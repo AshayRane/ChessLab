@@ -1,6 +1,6 @@
 {
   "name": "chesslab",
-  "version": "2.6.0",
+  "version": "2.6.1",
   "private": true,
   "description": "A local-first chess opening trainer and game-review app.",
   "scripts": {

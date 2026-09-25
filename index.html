@@ -219,7 +219,7 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.6</span>
+<span class="ver-badge" title="ChessLab version">v2.6.1</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -301,13 +301,16 @@ function safeRecordKey(value, fallback='record'){
   const s=safeString(value,500).trim();
   return s && !UNSAFE_OBJECT_KEYS.has(s) ? s : fallback;
 }
-function normalizeEval(raw){
-  if(!isRecord(raw)) return null;
+function normalizeEval(raw, strict=false){
+  if(raw == null) return null;
+  if(!isRecord(raw)){ if(strict) throw new Error('Invalid engine evaluation'); return null; }
   const out = {};
   // v1 used cpWhite/mate/bestUci; v2 uses the explicit best* names.
   const cp = raw.bestCpWhite ?? raw.cpWhite;
   const mate = raw.bestMateWhite ?? raw.mate;
   const best = raw.best ?? raw.bestUci;
+  const invalid = value => value != null && (typeof value !== 'string' || !SAFE_UCI.test(value));
+  if(strict && (invalid(best) || invalid(raw.best) || invalid(raw.bestUci) || invalid(raw.bestPv) || invalid(raw.secondPv))) throw new Error('Invalid engine move');
   if(cp !== null && cp !== undefined) out.bestCpWhite = boundedNumber(cp, -100000, 100000, null);
   if(mate !== null && mate !== undefined) out.bestMateWhite = boundedNumber(mate, -1000, 1000, null);
   if(typeof best === 'string' && SAFE_UCI.test(best)) out.best = best.toLowerCase();
@@ -315,15 +318,15 @@ function normalizeEval(raw){
   if(typeof raw.secondPv === 'string' && SAFE_UCI.test(raw.secondPv)) out.secondPv = raw.secondPv;
   return Object.keys(out).length ? out : null;
 }
-function normalizePly(raw, index){
+function normalizePly(raw, index, strict=false){
   if(!isRecord(raw)) throw new Error('Invalid ply record');
   if(raw.mover != null && raw.mover !== 'w' && raw.mover !== 'b') throw new Error('Invalid ply mover');
   const fenBefore = safeString(raw.fenBefore, 120);
   const uci = typeof raw.uci === 'string' && SAFE_UCI.test(raw.uci) ? raw.uci.toLowerCase() : '';
   const san = safeString(raw.san, 32);
   if(!fenBefore || !san) throw new Error('Invalid ply record');
-  const evalBefore = normalizeEval(raw.evalBefore ?? raw.evalBeforeActual);
-  const evalAfter = normalizeEval(raw.evalAfter ?? raw.evalAfterActual);
+  const evalBefore = normalizeEval(raw.evalBefore ?? raw.evalBeforeActual, strict);
+  const evalAfter = normalizeEval(raw.evalAfter ?? raw.evalAfterActual, strict);
   const out = {
     i: boundedInt(raw.i ?? index, 0, 10000, index), san, uci, fenBefore,
     mover: raw.mover === 'b' ? 'b' : 'w', moveNum: boundedInt(raw.moveNum, 1, 5000, Math.floor(index/2)+1),
@@ -333,7 +336,9 @@ function normalizePly(raw, index){
     onlyMoveGap: raw.onlyMoveGap == null ? null : boundedNumber(raw.onlyMoveGap, -100000, 100000, null)
   };
   if(typeof raw.bestSan === 'string') out.bestSan = safeString(raw.bestSan, 32);
+  if(strict && raw.bestUci != null && (typeof raw.bestUci !== 'string' || !SAFE_UCI.test(raw.bestUci))) throw new Error('Invalid best move');
   if(typeof raw.bestUci === 'string' && SAFE_UCI.test(raw.bestUci)) out.bestUci = raw.bestUci.toLowerCase();
+  if(out.bestUci && !uciToSan(fenBefore,out.bestUci)) throw new Error('Invalid best move');
   if(Number.isFinite(raw.sacPawns)) out.sacPawns = boundedNumber(raw.sacPawns, -100, 100, 0);
   return out;
 }
@@ -352,6 +357,23 @@ function normalizeSummary(raw){
   }
   return out;
 }
+function validateAnalyzedChain(plies, hist, startFen){
+  if(!Array.isArray(plies) || !Array.isArray(hist) || plies.length !== hist.length) throw new Error('Analyzed game ply count mismatch');
+  const replay = new Chess(startFen);
+  for(let i=0;i<hist.length;i++){
+    const p=plies[i], expected=hist[i];
+    if(!p || !expected || p.san!==expected.san || p.mover!==expected.color || !p.uci || p.fenBefore!==replay.fen()) throw new Error('Analyzed game ply mismatch');
+    const vm=replay.moves({verbose:true}).find(m=>m.san===expected.san);
+    if(!vm || sanToUci(replay,expected.san)!==p.uci) throw new Error('Analyzed game ply mismatch');
+      if(p.evalBefore && p.evalBefore.best && !uciToSan(replay.fen(),p.evalBefore.best)) throw new Error('Invalid engine move');
+    if(p.bestUci && !uciToSan(replay.fen(),p.bestUci)) throw new Error('Invalid best move');
+    if(p.bestUci && p.evalBefore && p.evalBefore.best && p.bestUci!==p.evalBefore.best) throw new Error('Inconsistent best move');
+    if(p.bestSan && p.bestUci && p.bestSan!==uciToSan(replay.fen(),p.bestUci)) throw new Error('Inconsistent best move');
+    replay.move({from:vm.from,to:vm.to,promotion:vm.promotion});
+    if(p.evalAfter && p.evalAfter.best && !uciToSan(replay.fen(),p.evalAfter.best)) throw new Error('Invalid engine move');
+  }
+  return replay;
+}
 function normalizeRecord(raw, key, strict){
   if(!isRecord(raw)) throw new Error('Invalid analyzed game');
     const pgn = safeString(raw.pgn, 200000);
@@ -361,17 +383,13 @@ function normalizeRecord(raw, key, strict){
   catch(e){ throw new Error('Analyzed game has invalid PGN'); }
   const hist = parsed.history({verbose:true});
   const startFen = pgnStartFen(pgn, parsed.header() || {});
-  const plies = Array.isArray(raw.plies) ? raw.plies.map(normalizePly) : [];
+  const plies = Array.isArray(raw.plies) ? raw.plies.map((p,i)=>normalizePly(p,i,strict)) : [];
   if(!plies.length) throw new Error('Analyzed game has no plies');
   if(plies.length !== hist.length) throw new Error('Analyzed game ply count mismatch');
+  validateAnalyzedChain(plies, hist, startFen);
   const headers = {};
   if(isRecord(raw.headers)) for(const h of ['White','Black','WhiteElo','BlackElo','Result','ECO','Date','TimeControl','Termination','Link']) if(raw.headers[h] != null) headers[h] = safeString(raw.headers[h], 200);
   const summary = normalizeSummary(raw.summary);
-  for(const [i,p] of plies.entries()){
-    const expected = hist[i];
-    if(!expected || p.san !== expected.san || p.mover !== expected.color || !p.uci || sanToUci(new Chess(i ? p.fenBefore : startFen), p.san) !== p.uci) throw new Error('Analyzed game ply mismatch');
-    if(p.evalBefore && p.evalBefore.best && uciToSan(p.fenBefore,p.evalBefore.best) == null) throw new Error('Invalid engine move');
-  }
   return { key: safeRecordKey(key || raw.key, 'record'), url: typeof raw.url === 'string' ? safeString(raw.url, 1000) : null, pgn, date: safeString(raw.date, 40), headers, plies, summary, movetime: boundedInt(raw.movetime, 100, 10000, 700) };
 }
 function validateState(raw, {strict=true}={}){
@@ -472,29 +490,43 @@ const Engine = {
     if(this._cur){ const c=this._cur; this._cur=null; this._busy=false; rejectTask(c); }
     const q=this._queue.splice(0); for(const t of q) rejectTask(t);
   },
-  _try(idx){
+  _try(idx, preserveQueue=false){
     clearTimeout(this._hsTimer);
     this.ready=false; this.offline=false; this._gotUciOk=false;
     const old=this.worker; this.worker=null; if(old){ try{ old.terminate(); }catch(e){} }
-    this._flushPending(new Error('Engine worker restarted'));
+    const active=this._cur;
+    if(!preserveQueue){
+      this._flushPending(new Error('Engine worker restarted'));
+    }else if(active && !active._settled){
+      if(active.play) this._settle(active, null);
+      else {
+        clearTimeout(active.timeoutId);
+        this._queue.unshift(active);
+      }
+    }
     this._busy=false; this._cur=null;
-    if(idx >= this.SOURCES.length){ this.offline=true; this.status='offline'; App.onEngineStatus(); return; }
+    if(idx >= this.SOURCES.length){
+      this.offline=true; this.status='offline';
+      this._flushPending(new Error('Engine unavailable'));
+      App.onEngineStatus();
+      return;
+    }
     this._srcIdx=idx; this.status='loading'; this._generation++;
     const generation=this._generation; this._sourceGeneration=generation;
     const blobSrc = `try{ importScripts(${JSON.stringify(this.SOURCES[idx])}); }catch(err){ self.postMessage('__fatal:'+String(err)); }`;
     let worker;
     try{ worker = new Worker(URL.createObjectURL(new Blob([blobSrc],{type:'text/javascript'}))); }
-    catch(e){ this._try(idx+1); return; }
+    catch(e){ this._try(idx+1, preserveQueue); return; }
     worker.onmessage = e=>{ if(generation !== this._generation || worker !== this.worker) return; this._onMsg(e); };
-    worker.onerror = ()=>{ if(generation === this._generation) this._try(idx+1); };
+    worker.onerror = ()=>{ if(generation === this._generation) this._try(idx+1, preserveQueue); };
     this.worker = worker;
-    this._hsTimer = setTimeout(()=>{ if(generation === this._generation && !this.ready) this._try(idx+1); }, 25000);
+    this._hsTimer = setTimeout(()=>{ if(generation === this._generation && !this.ready) this._try(idx+1, preserveQueue); }, 25000);
     worker.postMessage('uci');
   },
   _onMsg(e){
     const line = typeof e.data==='string' ? e.data : (e.data && e.data.data);
     if(typeof line!=='string') return;
-    if(line.startsWith('__fatal')){ this._try(this._srcIdx+1); return; }
+    if(line.startsWith('__fatal')){ this._try(this._srcIdx+1, true); return; }
     if(line.startsWith('uciok')){
       this._gotUciOk = true;
       this.worker.postMessage('setoption name MultiPV value 2');
@@ -546,12 +578,18 @@ const Engine = {
     clearTimeout(task.timeoutId);
     if(error && task.reject) task.reject(error); else task.resolve(result);
   },
+  _restartAfterStop(task){
+    if(this._cur !== task || !task._stopping) return;
+    clearTimeout(this._stopTimer);
+    this._cur = null; this._busy = false; task._stopping = false;
+    this._try(this._srcIdx, true);
+  },
   _stopCurrent(task, result, error){
     if(this._cur !== task) return;
     this._settle(task, result, error);
     task._stopping=true;
     try{ this.worker && this.worker.postMessage('stop'); }catch(e){}
-    this._stopTimer=setTimeout(()=>{ if(this._cur===task) this._finish(task); }, 1000);
+    this._stopTimer=setTimeout(()=>this._restartAfterStop(task), 1000);
   },
   _finish(task, result, error){
     clearTimeout(task.timeoutId);
@@ -616,6 +654,7 @@ const Engine = {
       if(!t.play) return true;
       this._settle(t, null); return false;
     });
+    if(this._cur && this._cur._stopping) return;
     this._pump();
   },
   /* For play: set Skill Level, then a single-PV search */
@@ -843,6 +882,7 @@ const Board = {
   el:null, chess:null, flipped:false,
   pieces:new Map(),     // key -> {el, sq, type, color}
   selected:null,
+  focusSquare:null,
   interactive:false, onUserMove:null, color:'w',
   lastMove:null, bestMove:null,
   init(el, chess, {color='w', interactive=false}={}){
@@ -856,6 +896,7 @@ const Board = {
     this.pieces.clear();
     el.innerHTML = '';  // wipe any previous board DOM (squares, overlays, pieces)
     this.selected = null;
+    this.focusSquare = this.color==='b' ? 'e8' : 'e2';
     this.lastMove = null; this.bestMove = null;
     this._buildSquaresOnce();
     this._syncPieces(true);
@@ -1034,16 +1075,25 @@ const Board = {
     const listen=(type, fn, opts)=>{ this.el.addEventListener(type, fn, opts); this._handlers.push([type, fn, opts]); };
     this.el.setAttribute('tabindex','0');
     const keyboardHandler = e=>{
-      if(!this.interactive || !this.selected) return;
+      if(!this.interactive) return;
+      if(e.key==='Enter' || e.key===' '){
+        e.preventDefault();
+        if(this.focusSquare) this._onSquare(this.focusSquare);
+        return;
+      }
       const dirs={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0]};
       const d=dirs[e.key]; if(!d) return;
       e.preventDefault();
-      const f='abcdefgh'.indexOf(this.selected[0]), r=+this.selected[1];
-      const nf=Math.max(0,Math.min(7,f+d[0])), nr=Math.max(1,Math.min(8,r+d[1]));
-      this._onSquare('abcdefgh'[nf]+nr);
+      const current=this.focusSquare || (this.color==='b' ? 'e7' : 'e2');
+      const f='abcdefgh'.indexOf(current[0]), r=+current[1];
+      const nf=Math.max(0,Math.min(7,f+d[0]));
+      const nr=Math.max(1,Math.min(8,r+(this.color==='b' ? -d[1] : d[1])));
+      this.focusSquare='abcdefgh'[nf]+nr;
+      const target=this.el.querySelector(`.sq[data-sq="${this.focusSquare}"]`);
+      if(target) target.focus({preventScroll:true});
     };
     this._keyboardHandler=keyboardHandler;
-    this._handlers.push(['keydown',keyboardHandler,undefined]);
+    listen('keydown', keyboardHandler, undefined);
     const sqFromEvent = e=>{
       const rect = this.el.getBoundingClientRect();
       const x = Math.floor((e.clientX-rect.left)/rect.width*8);
@@ -1150,11 +1200,10 @@ const Review = {
     const g = new Chess();
     if(!g.load_pgn(rec.pgn,{sloppy:true}) || !Array.isArray(rec.plies) || rec.plies.length !== g.history({verbose:true}).length){ toast('Could not load game','err'); return; }
     const hist = g.history({verbose:true});
-    for(let i=0;i<hist.length;i++){
-      const p=rec.plies[i];
-      if(!p || p.san!==hist[i].san || p.mover!==hist[i].color || !p.uci || sanToUci(new Chess(p.fenBefore),p.san)!==p.uci){ toast('Could not load game','err'); return; }
-    }
-    this.data = rec; this.chess = g; this.hist = hist; this.startFen = pgnStartFen(rec.pgn, g.header() || {});
+    const startFen = pgnStartFen(rec.pgn, g.header() || {});
+    try{ validateAnalyzedChain(rec.plies, hist, startFen); }
+    catch(e){ toast('Could not load game','err'); return; }
+    this.data = rec; this.chess = g; this.hist = hist; this.startFen = startFen;
     this.plys = rec.plies; this.summary = rec.summary || {}; this.headers = rec.headers || {};
     this.nav = 0; this.branch = null; this.flipped = false;
     App.view='review'; render();
@@ -1305,7 +1354,7 @@ function renderReviewReport(){
         ${curPly.sacPawns>=2?`<p class="small faint">Material invested: ${curPly.sacPawns} pawns</p>`:''}`;
     }
   }
-  const mySum = myColor && R.summary ? R.summary[myColor] : null;
+  const mySum = myColor && R.summary ? (R.summary[myColor==='w'?'white':'black'] || null) : null;
   let rows='';
   for(let i=0;i<R.hist.length;i+=2){
     const a=R.plys[i], b2=R.plys[i+1];
@@ -1361,7 +1410,7 @@ function renderProgress(){
   if(!games.length) return `<h1>Progress</h1><div class="card empty mt-14"><h3>Nothing to measure yet</h3><p>Analyze games in the Review tab — accuracy, blunder rate and weak openings appear here.</p></div>`;
   const rows = games.map(g=>{
     const c = myColorOfHeaders(g.headers||{});
-    return {g, sum: c&&g.summary?g.summary[c]:null, date:g.date||''};
+    return {g, sum: c && g.summary ? (g.summary[c==='w'?'white':'black'] || null) : null, date:g.date||''};
   }).filter(x=>x.sum).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
   if(!rows.length) return `<h1>Progress</h1><div class="card empty mt-14"><h3>Not your games</h3><p>Analyzed games are missing your username in headers.</p></div>`;
   const n = rows.length;
@@ -1369,11 +1418,12 @@ function renderProgress(){
   const bpg = rows.reduce((a,x)=>a+x.sum.blunder,0)/n;
   const mpg = rows.reduce((a,x)=>a+x.sum.mistake,0)/n;
   // weakness by ECO
-  const groups={};
+  const groups=Object.create(null);
   for(const x of rows){
     let key = (x.g.headers||{}).ECO;
     if(!key) key = (x.g.plies? x.g.plies.slice(0,6).map(p=>p.san).join(' '):'') || '?';
-    (groups[key] ||= {name:key,n:0,acc:0,b:0});
+    key=safeString(key, 120).trim() || '?';
+    if(!Object.prototype.hasOwnProperty.call(groups,key)) groups[key]={name:key,n:0,acc:0,b:0};
     groups[key].n++; groups[key].acc+=x.sum.accuracy; groups[key].b+=x.sum.blunder;
   }
   const weak = Object.values(groups).map(g=>({...g, avg:g.acc/g.n, bpg:g.b/g.n})).sort((a,b)=>a.avg-b.avg);
@@ -1638,7 +1688,7 @@ function handleAction(t, e){
     case 'bb-practice': practiceFromChess(); break;
     case 'practice-line': {
       const line = Store.state.openingLines.find(l=>l.id===t.dataset.id);
-      if(line){ Play.start({color:Store.state.settings.color, skill:Store.state.settings.skill, lineName:line.name, lineFen:line.fen, lineMoves:line.moves}); }
+      if(line){ Play.start({color:Store.state.settings.color, skill:Store.state.settings.skill, lineName:line.name, lineFen:line.fen, lineMoves:line.moves, deriveColorFromLine:true}); }
       break;
     }
     case 'del-line': {
@@ -1693,7 +1743,12 @@ function handleAction(t, e){
     case 'nav-next': if(Review.data) Review.setPly(Review.nav+1); break;
     case 'play-best': if(Review.data && !Review.playBest()) toast('No legal best move at this position','err'); break;
     case 'flip-review': if(Review.data) Review.flip(); break;
-    case 'cancel-analysis': App.analysisCancelled = true; break;
+    case 'cancel-analysis':
+      App.analysisCancelled = true;
+      App.analysisRunId++;
+      App.analyzing = null;
+      render();
+      break;
     case 'save-settings': {
       const u = $('#s-user').value.trim();
       if(u){ Store.state.settings.username=u; Store.save(); refreshAccountChip(); toast('Saved'); }
@@ -1745,8 +1800,10 @@ function openPasteModal(){
 /* =================== ANALYSIS RUNNER =================== */
 async function runAnalysis(list, {jumpTo=false}={}){
   if(!Engine.ready){ toast('Engine not ready yet','err'); return; }
+  const runId = ++App.analysisRunId;
   App.analysisCancelled = false;
   const mt = Store.state.settings.reviewMovetime;
+  const currentRun = ()=>App.analysisRunId===runId && !App.analysisCancelled;
   for(const gm of list){
     if(!gm || typeof gm.pgn!=='string' || !gm.pgn.trim()){ toast('Invalid game data','err'); return; }
     const rawKey = typeof gm.url==='string' ? gm.url : '';
@@ -1758,27 +1815,34 @@ async function runAnalysis(list, {jumpTo=false}={}){
     const rawDate = Number(gm.end_time);
     const date = Number.isFinite(rawDate) && Math.abs(rawDate) <= 8640000000000
       ? new Date(rawDate*1000).toISOString().slice(0,10) : new Date().toISOString().slice(0,10);
-    App.analyzing = {label, done:0, total:1};
+    if(!currentRun()) return;
+    App.analyzing = {runId, label, done:0, total:1};
     App.view='review'; render();
     try{
         const res = await analyzeGame(gm.pgn, {
       movetime: mt,
-      onProgress:(d,tot)=>{ if(!App.analyzing) return; App.analyzing.done=d; App.analyzing.total=tot;
+      onProgress:(d,tot)=>{ if(!currentRun() || !App.analyzing || App.analyzing.runId!==runId) return; App.analyzing.done=d; App.analyzing.total=tot;
         const bar=document.querySelector('.progress-wrap i'); if(bar) bar.style.width=Math.round(d/tot*100)+'%';
         const lbl=document.querySelector('#ana-count'); if(lbl) lbl.textContent='position '+d+'/'+tot; },
-        isCancelled:()=>App.analysisCancelled,
+        isCancelled:()=>!currentRun(),
       });
       const normalized = validateState({settings:Store.state.settings, analyzed:{[key]:{ key, url:rawKey||null, pgn:gm.pgn,
                 date, headers:res.headers, plies:res.plies, summary:res.summary, movetime:mt }}}, {strict:true}).analyzed[key];
+      if(!currentRun()) return;
       if(!normalized) throw new Error('Analysis record failed validation');
       Store.state.analyzed[key] = normalized;
       Store.save();
-      App.analyzing=null;
+      if(App.analyzing && App.analyzing.runId===runId) App.analyzing=null;
       if(jumpTo){ Review.open(Store.state.analyzed[key]); }
       else render();
     }catch(err){
-      App.analyzing=null;
-      if(String(err.message)==='cancelled'){ toast('Analysis cancelled'); render(); return; }
+      if(String(err.message)==='cancelled'){
+        if(App.analyzing && App.analyzing.runId===runId) App.analyzing=null;
+        if(currentRun()){ toast('Analysis cancelled'); render(); }
+        return;
+      }
+      if(!currentRun()) return;
+      if(App.analyzing && App.analyzing.runId===runId) App.analyzing=null;
       toast('Analysis failed: '+err.message,'err');
       render();
     }
@@ -1816,7 +1880,7 @@ function saveBuilderLine(){
 function practiceFromChess(){
   const B = App.builder;
   if(!B || !B.chess.history().length){ toast('Play some moves first (or practice from start)','err'); return; }
-  Play.start({ color:Store.state.settings.color, skill:Store.state.settings.skill, lineName:'My line', lineMoves:B.chess.history().join(' ') });
+  Play.start({ color:Store.state.settings.color, skill:Store.state.settings.skill, lineName:'My line', lineMoves:B.chess.history().join(' '), deriveColorFromLine:true });
 }
 
 /* =================== IMPORTER =================== */
@@ -1882,7 +1946,7 @@ const App = {
   builder:null,       // {chess, name, selected}
   importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null, requestId:0},
   importRequestId:0, importAbort:null, accountRequestId:0,
-  analysisCancelled:false,
+  analysisRunId:0, analysisCancelled:false,
   onEngineStatus(){
     const chip = document.getElementById('chip-engine');
     if(chip){
@@ -1900,7 +1964,7 @@ const Play = {
     if(this.session) this.session.cancelled=true;
     this.session=null;
   },
-  start({color, skill, lineName, lineFen, lineMoves}){
+  start({color, skill, lineName, lineFen, lineMoves, deriveColorFromLine=false}){
     let chess;
     try{ chess = lineFen? new Chess(lineFen) : new Chess(); }
     catch(e){ toast('Invalid start position','err'); return; }
@@ -1916,8 +1980,15 @@ const Play = {
       lineUci.push(mv.from+mv.to+(mv.promotion||''));
     }
     if(err){ toast(err,'err'); return; }
+    const history = chess.history({verbose:true});
+    const lastLineMove = history.length ? history[history.length-1] : null;
+    const requestedColor = color==='b' ? 'b' : 'w';
+    const playerColor = deriveColorFromLine && lastLineMove
+      ? (lastLineMove.color==='b' ? 'b' : 'w')
+      : requestedColor;
+    const engineColor = playerColor==='w' ? 'b' : 'w';
     const generation=++this._generation;
-    this.session = { id:uid(), generation, chess, color:color==='b'?'b':'w', skill:Math.max(0,Math.min(20,+skill||0)), lineName:lineName||null, lineUci, lineErr:err, finished:false, cancelled:false, result:null, termination:null, pgn:null, flipped:false };
+    this.session = { id:uid(), generation, chess, color:playerColor, engineColor, skill:Math.max(0,Math.min(20,+skill||0)), lineName:lineName||null, lineUci, lineErr:err, lineLastMover:lastLineMove ? (lastLineMove.color==='b'?'b':'w') : null, finished:false, cancelled:false, result:null, termination:null, pgn:null, flipped:false };
     this._thinking=false;
     this.checkEnd(this.session);
     App.view='play'; render();
@@ -1926,7 +1997,7 @@ const Play = {
   _valid(S){ return !!(S && this.session===S && S.generation===this._generation && !S.cancelled); },
   engineTurn(){
     const S=this.session;
-    if(!this._valid(S) || S.finished || S.chess.turn()===S.color) return;
+    if(!this._valid(S) || S.finished || S.chess.turn()!==S.engineColor) return;
     const ply = S.chess.history().length;
     if(ply < S.lineUci.length){
       const scripted = S.lineUci[ply];
@@ -2125,6 +2196,8 @@ function renderOpenings(){
       '<button class="btn btn-green btn-sm" data-act="practice-line" data-id="'+esc(l.id)+'">Practice</button>'+
       '<button class="icon-btn" data-act="del-line" data-id="'+esc(l.id)+'" aria-label="Delete">&#128465;</button></div>').join('')+'</div>'
     : '<div class="card card-pad small muted mt-14">No saved lines yet. Play moves on the board, name the line, and Save.</div>';
+  const lastColor = hist.length ? (hist[hist.length-1].color==='b'?'b':'w') : 'w';
+  const derivedSides = {you:lastColor==='b'?'Black':'White', engine:lastColor==='b'?'White':'Black'};
   return '<h1>Openings Workshop</h1>'+
     '<p class="muted mt-8">Play the moves you want to practice (for both sides), save the line, then practice it: the engine answers along your line and takes over where it ends.</p>'+
     '<div class="game-grid mt-14"><div class="board-col">'+
@@ -2137,7 +2210,8 @@ function renderOpenings(){
     '<button class="btn btn-green btn-sm" data-act="bb-save">Save line</button>'+
     '<button class="btn btn-green btn-sm" data-act="bb-practice">Practice from here</button>'+
     '</div></div><div class="panel">'+
-    '<div class="card card-pad"><div class="field"><label for="bb-name">Line name</label>'+
+    '<div class="card card-pad"><div class="field"><span class="field-label">Practice sides</span><div data-opening-sides class="small muted">You: <b>'+derivedSides.you+'</b> · Engine: <b>'+derivedSides.engine+'</b></div><div class="small faint">Derived from the last move in your line; the engine takes the next turn.</div></div>'+
+    '<div class="field"><label for="bb-name">Line name</label>'+
     '<input class="input" id="bb-name" placeholder="e.g. My Alapin setup" value="'+esc(B.name||'')+'"></div>'+
     '<div class="small muted">Moves: <b id="bb-count">'+B.chess.history().length+'</b> plies</div></div>'+
     '<div class="moves-box" style="max-height:240px"><div class="moves-grid">'+(rows||'<p class="small muted" style="grid-column:1/-1;padding:12px">Play moves on the board to build your line.</p>')+'</div></div>'+

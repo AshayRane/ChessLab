@@ -72,8 +72,16 @@ function loadApp({ storage = {} } = {}) {
   const script = inlineScripts.join('\n');
   vm.createContext(context);
   vm.runInContext(script, context, { filename: 'index-inline.js' });
-  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, classifyPly, analyzeGame, validateState, defaultState, render };', context);
+  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, classifyPly, analyzeGame, validateState, defaultState, render, runAnalysis, renderProgress, openModal, handleAction, myColorOfHeaders, validateAnalyzedChain };', context);
   return { dom, window, context };
+}
+
+async function waitFor(predicate, message='condition was not met', timeoutMs=2000){
+  const started = Date.now();
+  while(!predicate()){
+    if(Date.now() - started > timeoutMs) throw new Error(message);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
 }
 
 function getSourceFunction(source, name) {
@@ -143,6 +151,51 @@ test('strict state validation rejects an opening line with an unsafe id', () => 
   assert.throws(() => context.validateState({
     settings: {}, openingLines: [{ id: 'x" onclick="alert(1)', name: 'x', moves: '' }]
   }), /Invalid/i);
+});
+
+test('Openings shows the sides derived from the last line move and saved-line practice uses them', () => {
+  const { context } = loadApp();
+  const { Store, App, Play, Engine, render } = context.__test;
+  const originalPlayMove = Engine.playMove;
+  Engine.playMove = () => new Promise(() => {});
+  Store.state = context.defaultState();
+  App.builder = { chess: new Chess(), name: 'Derived sides' };
+  App.builder.chess.move('e4');
+  App.builder.chess.move('e5');
+  App.view = 'openings';
+  render();
+  const status = context.document.querySelector('[data-opening-sides]');
+  assert.ok(status, 'Openings must show the derived practice sides');
+  assert.match(status.textContent, /You:\s*Black/i);
+  assert.match(status.textContent, /Engine:\s*White/i);
+  assert.equal(context.document.querySelector('[data-opening-color]'), null, 'sides must be derived, not manually selected');
+
+  Store.state.openingLines = [{ id: 'derived', name: 'Derived line', moves: 'e4 e5', fen: null }];
+  render();
+  context.document.querySelector('[data-act="practice-line"]').click();
+  assert.equal(Play.session.color, 'b');
+  assert.equal(Play.session.engineColor, 'w');
+  assert.equal(Play.session.chess.turn(), 'w');
+  Play.cancel();
+  Engine.playMove = originalPlayMove;
+});
+
+test('opening practice derives Black ownership when the line ends on a Black move', () => {
+  const { context } = loadApp();
+  const { Store, App, Play, Engine, render } = context.__test;
+  const originalPlayMove = Engine.playMove;
+  Engine.playMove = () => new Promise(() => {});
+  Store.state = context.defaultState();
+  App.builder = { chess: new Chess(), name: 'Test line' };
+  App.builder.chess.move('e4');
+  App.view = 'openings';
+  render();
+  context.document.querySelector('[data-act="bb-practice"]').click();
+  assert.equal(Play.session.color, 'w');
+  assert.equal(Play.session.engineColor, 'b');
+  assert.equal(Play.session.chess.turn(), 'b');
+  Play.cancel();
+  Engine.playMove = originalPlayMove;
 });
 
 test('builder seek uses an explicit action instead of generic ply navigation', () => {
@@ -228,6 +281,51 @@ test('strict analysis state accepts records without an optional practiceGames ar
   assert.equal(Object.keys(state.analyzed).length, 1);
 });
 
+test('progress rendering treats __proto__ ECO as data, not an object prototype', () => {
+  const { context } = loadApp();
+  const { Store, App, renderProgress } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'victim';
+  Store.state.analyzed = { hostile: {
+    key: 'hostile', pgn: '1. e4 e5 1-0', date: '2026-01-01', headers: { White: 'victim', Black: 'other', ECO: '__proto__' },
+    summary: { white: { accuracy: 80, blunder: 1 }, black: { accuracy: 70, blunder: 2 } },
+    plies: [{ fenBefore: new Chess().fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1 }]
+  } };
+  App.view = 'progress';
+  const before = Object.prototype.n;
+  const html = renderProgress();
+  assert.equal(context.myColorOfHeaders(Store.state.analyzed.hostile.headers), 'w');
+  assert.equal(Object.prototype.n, before);
+  assert.match(html, /__proto__/);
+});
+
+test('progress rendering does not mutate Object.prototype from imported ECO keys', () => {
+  const { context } = loadApp();
+  const { Store, App, renderProgress } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'victim';
+  for (const eco of ['__proto__', 'constructor', 'toString']) Store.state.analyzed[eco] = {
+    key: eco, pgn: '1. e4 e5 1-0', date: '2026-01-01', headers: { White: 'victim', Black: 'other', ECO: eco },
+    summary: { white: { accuracy: 80, blunder: 1 }, black: { accuracy: 70, blunder: 2 } }, plies: []
+  };
+  App.view = 'progress';
+  const before = { n: Object.prototype.n, acc: Object.prototype.acc, b: Object.prototype.b };
+  renderProgress();
+  assert.deepEqual({ n: Object.prototype.n, acc: Object.prototype.acc, b: Object.prototype.b }, before);
+});
+
+test('rendered saved-line controls use the escaped data-id value', () => {
+  const { context } = loadApp();
+  const { Store, App, render } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.openingLines = [{ id: 'safe', name: 'Line', moves: 'e4' }];
+  App.view = 'openings';
+  render();
+  const button = context.document.querySelector('[data-act="practice-line"]');
+  assert.equal(button.getAttribute('data-id'), 'safe');
+  assert.equal(button.getAttribute('onclick'), null);
+});
+
 test('analysis honors a PGN FEN setup instead of replaying from the standard start', async () => {
   const { context } = loadApp();
   const { Engine, analyzeGame } = context.__test;
@@ -243,6 +341,33 @@ test('analysis honors a PGN FEN setup instead of replaying from the standard sta
   Engine.analyse = original;
   assert.equal(result.plies[0].fenBefore, start);
   assert.match(result.plies[1].fenBefore, /5N2/);
+});
+
+test('strict analysis state rejects malformed engine moves instead of dropping them', () => {
+  const { context } = loadApp();
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const base = {
+    key: 'bad', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: new Chess().fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null },
+      { fenBefore: 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1', san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: null, evalAfter: null }
+    ]
+  };
+  assert.throws(() => context.validateState({ settings: {}, analyzed: { bad: {
+    ...base, plies: [{ ...base.plies[0], evalBefore: { best: 'e9e9', bestCpWhite: 0 } }, base.plies[1]]
+  } } }, { strict: true }), /engine|invalid/i);
+  assert.throws(() => context.validateState({ settings: {}, analyzed: { bad: {
+    ...base, plies: [base.plies[0], { ...base.plies[1], evalAfter: { best: 'e9e9', bestCpWhite: 0 } }]
+  } } }, { strict: true }), /engine|invalid/i);
+  assert.throws(() => context.validateState({ settings: {}, analyzed: { bad: {
+    ...base, plies: [{ ...base.plies[0], evalBefore: 'e9e9' }, base.plies[1]]
+  } } }, { strict: true }), /engine|invalid/i);
+  assert.throws(() => context.validateState({ settings: {}, analyzed: { bad: {
+    ...base, plies: [{ ...base.plies[0], evalBefore: { best: 'e2e4', bestUci: 'e9e9', bestCpWhite: 0 } }, base.plies[1]]
+  } } }, { strict: true }), /engine|invalid/i);
+  assert.throws(() => context.validateState({ settings: {}, analyzed: { bad: {
+    ...base, plies: [{ ...base.plies[0], bestUci: 'e9e9' }, base.plies[1]]
+  } } }, { strict: true }), /engine|invalid/i);
 });
 
 test('a stopped engine search cannot complete the next queued search', async () => {
@@ -262,6 +387,100 @@ test('a stopped engine search cannot complete the next queued search', async () 
   Engine._dispatch('bestmove d2d4');
   const value = await second;
   assert.equal(value.best, 'd2d4');
+});
+
+test('keyboard navigation moves focus without selecting or moving until activation', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  const g = new Chess();
+  const calls = [];
+  Board.init(el, g, { color: 'w', interactive: true });
+  Board.onSquare = sq => calls.push(sq);
+  el.dispatchEvent(new context.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+  assert.equal(Board.focusSquare, 'e3');
+  assert.deepEqual(calls, []);
+  el.dispatchEvent(new context.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  assert.deepEqual(calls, ['e3']);
+});
+
+test('engine source fallback preserves queued analysis after a replacement-worker failure', async () => {
+  const { context } = loadApp();
+  const { Engine } = context.__test;
+  const OriginalWorker = context.Worker;
+  let constructions = 0;
+  context.Worker = class {
+    constructor() {
+      constructions++;
+      if (constructions === 1) throw new Error('first source unavailable');
+      this.messages = [];
+      this.onmessage = null;
+      this.onerror = null;
+    }
+    postMessage(message) {
+      this.messages.push(message);
+      if (message === 'uci') setTimeout(() => this.onmessage?.({ data: 'uciok' }), 0);
+      if (message === 'isready') setTimeout(() => this.onmessage?.({ data: 'readyok' }), 0);
+    }
+    terminate() {}
+  };
+  Engine.SOURCES = ['bad', 'good'];
+  Engine.worker = null; Engine.ready = false; Engine.offline = false;
+  Engine._busy = false; Engine._cur = null; Engine._queue = []; Engine._generation = 1;
+  let rejected = false;
+  const pending = Engine.analyse(new Chess().fen(), 700, 1).catch(() => { rejected = true; });
+  Engine._try(0, true);
+  await waitFor(() => Engine._cur?.kind === 'analysis', 'replacement worker did not start queued analysis');
+  assert.equal(constructions, 2);
+  assert.equal(rejected, false, 'queued analysis must survive source fallback');
+  assert.equal(Engine._cur?.kind, 'analysis');
+  Engine._dispatch('info depth 1 multipv 1 score cp 0 pv e2e4');
+  Engine._dispatch('bestmove e2e4');
+  await pending;
+  context.Worker = OriginalWorker;
+});
+
+test('engine fatal source fallback preserves active and queued analysis', async () => {
+  const { context } = loadApp();
+  const { Engine } = context.__test;
+  const OriginalWorker = context.Worker;
+  let constructions = 0;
+  context.Worker = class {
+    constructor() {
+      constructions++;
+      this.messages = [];
+      this.onmessage = null;
+      this.onerror = null;
+    }
+    postMessage(message) {
+      this.messages.push(message);
+      if (message === 'uci') setTimeout(() => this.onmessage?.({ data: 'uciok' }), 0);
+      if (message === 'isready') setTimeout(() => this.onmessage?.({ data: 'readyok' }), 0);
+    }
+    terminate() {}
+  };
+  Engine.SOURCES = ['bad', 'good'];
+  Engine.worker = null; Engine.ready = false; Engine.offline = false;
+  Engine._busy = false; Engine._cur = null; Engine._queue = []; Engine._generation = 1;
+  const firstFen = new Chess().fen();
+  const secondFen = new Chess('rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1').fen();
+  const first = Engine.analyse(firstFen, 700, 1);
+  const second = Engine.analyse(secondFen, 700, 1);
+  Engine._try(0, true);
+  await waitFor(() => Engine._cur?.fen === firstFen, 'initial analysis did not start');
+  Engine.worker.onmessage({ data: '__fatal:source failed' });
+  await waitFor(() => constructions === 2 && Engine._cur?.fen === firstFen, 'source failure lost active analysis');
+  assert.equal(constructions, 2);
+  assert.equal(Engine._cur?.fen, firstFen, 'active analysis must be requeued after source failure');
+  Engine._dispatch('info depth 1 multipv 1 score cp 0 pv e2e4');
+  Engine._dispatch('bestmove e2e4');
+  await first;
+  await waitFor(() => Engine._cur?.fen === secondFen, 'queued analysis did not start after first completed');
+  assert.equal(Engine._cur?.fen, secondFen, 'queued analysis must remain queued');
+  Engine._dispatch('info depth 1 multipv 1 score cp 0 pv e7e5');
+  Engine._dispatch('bestmove e7e5');
+  await second;
+  context.Worker = OriginalWorker;
 });
 
 test('an illegal engine reply falls back to a legal move instead of wedging Play', () => {
