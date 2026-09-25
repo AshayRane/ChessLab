@@ -218,7 +218,7 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.4</span>
+<span class="ver-badge" title="ChessLab version">v2.5</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -1226,6 +1226,7 @@ function mountBuilderBoard(){
   const el = $('#builder-board');
   if(!el) return;
   if(!App.builder) App.builder = {chess:new Chess(), name:''};
+  restorePlaybook();
   Board.init(el, App.builder.chess, { color: Store.state.settings.color, interactive:true });
   Board.render();
   Board._onSquare = function(sq){
@@ -1237,6 +1238,7 @@ function mountBuilderBoard(){
         B.selected=null;
         Board.selected=null;
         Board.render({lastMove:{from:mv.from,to:mv.to}});
+        savePlaybook();
         refreshBuilderUI();
         return;
       }
@@ -1308,6 +1310,7 @@ function bindView(){
   });
   view.addEventListener('input', e=>{
     const t=e.target;
+    if(t.id==='bb-name'){ if(App.builder) App.builder.name = t.value; savePlaybook(); }
     if(t.id==='s-mt'){ $('#s-mt-lab').textContent = t.value+' ms'; Store.state.settings.reviewMovetime=+t.value; Store.save(); }
     if(t.id==='s-skill'){ Store.state.settings.skill=+t.value; Store.save(); }
   });
@@ -1346,15 +1349,15 @@ function handleAction(t, e){
       if(S&&S.pgn) runAnalysis([{url:null, pgn:S.pgn, time_class:'practice'}], {jumpTo:true});
       break;
     }
-    case 'bb-undo': { const B=App.builder; if(B){ B.chess.undo(); Board.selected=null; refreshBuilderUI(); } break; }
+    case 'bb-undo': { const B=App.builder; if(B){ B.chess.undo(); Board.selected=null; B.selected=null; savePlaybook(); refreshBuilderUI(); } break; }
     case 'bb-seek': {
       const B=App.builder; const target=+t.dataset.ply;
       if(B){ while(B.chess.history().length >= target && B.chess.history().length>0) B.chess.undo();
-        B.selected=null; Board.selected=null; refreshBuilderUI(); }
+        B.selected=null; Board.selected=null; savePlaybook(); refreshBuilderUI(); }
       break;
     }
     case 'bb-flip': { Store.state.settings.color = Store.state.settings.color==='w'?'b':'w'; Store.save(); refreshBuilderUI(); break; }
-    case 'bb-clear': { const B=App.builder; if(B){ B.chess=new Chess(); B.selected=null; Board.selected=null; refreshBuilderUI(); } break; }
+    case 'bb-clear': { const B=App.builder; if(B){ B.chess=new Chess(); B.selected=null; Board.selected=null; Store.state.playbook=null; Store.save(); refreshBuilderUI(); } break; }
     case 'bb-save': saveBuilderLine(); break;
     case 'bb-practice': practiceFromChess(); break;
     case 'practice-line': {
@@ -1503,11 +1506,33 @@ async function runAnalysis(list, {jumpTo=false}={}){
 }
 
 /* =================== BUILDER / PRACTICE HELPERS =================== */
+function savePlaybook(){
+  const B = App.builder; if(!B) return;
+  try{
+    const nameInput = $('#bb-name');
+    Store.state.playbook = { name: (nameInput && nameInput.value.trim()) || B.name || '',
+      moves: B.chess.history().join(' '), updated: Date.now() };
+    Store.save();
+  }catch(e){}
+}
+function restorePlaybook(){
+  const B = App.builder; if(!B) return;
+  const pb = Store.state.playbook;
+  if(!pb || !pb.moves) return;
+  if(B.chess.history().length) return;          // live board wins over the draft
+  try{
+    for(const tok of sanitizeMoves(pb.moves)){
+      try{ if(!B.chess.move(tok)) break; }catch(e){ break; }
+    }
+    if(pb.name && !B.name) B.name = pb.name;
+  }catch(e){}
+}
 function saveBuilderLine(){
   const B = App.builder;
   if(!B || !B.chess.history().length){ toast('Play some moves first','err'); return; }
   const name = ($('#bb-name')&&$('#bb-name').value.trim()) || 'My line';
   Store.state.openingLines.push({ id:uid(), name, fen:null, moves:B.chess.history().join(' '), created:Date.now() });
+  savePlaybook();
   Store.save(); toast('Line "'+name+'" saved'); render();
 }
 function practiceFromChess(){
@@ -1771,7 +1796,9 @@ function movesGridHTML(hist, plys){
 
 /* =================== OPENINGS BUILDER =================== */
 function renderOpenings(){
-  const B = App.builder || {chess:new Chess(), name:''};
+  if(!App.builder) App.builder = {chess:new Chess(), name:''};
+  restorePlaybook();                     // restore draft before panels render (name + move list)
+  const B = App.builder;
   const hist = B.chess.history({verbose:true});
   let rows='';
   for(let i=0;i<hist.length;i+=2){
