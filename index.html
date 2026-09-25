@@ -26,6 +26,7 @@
   --eval-white:#f7f6f5; --eval-black:#4b4847;
   --font:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif;
 }
+html[data-theme="dark"] .coord-file,html[data-theme="dark"] .coord-rank{color:inherit}
 html[data-theme="dark"]{
   --bg:#21201e; --bg-2:#2a2826; --surface:#2a2826; --surface-2:#312e2c;
   --border:#3d3a37; --border-soft:#3a3734;
@@ -218,12 +219,12 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.5</span>
+<span class="ver-badge" title="ChessLab version">v2.6</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
 <div id="modal-root"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.js"></script>
+<script src="chess.js"></script>
 <script>
 'use strict';
 /* ChessLab v2 — chess.com-style UI + engine/logic overhaul
@@ -246,48 +247,203 @@ function toast(msg, kind=''){
 }
 function openModal(title, bodyHTML, onMount){
   const root = $('#modal-root');
+  const previous = document.activeElement;
+  // bodyHTML is reserved for trusted, static templates; never pass imported/user data here.
   root.innerHTML = `<div class="modal-backdrop"><div class="modal" role="dialog" aria-modal="true" aria-label="${esc(title)}">
     <div class="modal-head"><h2>${esc(title)}</h2><button class="icon-btn" data-close aria-label="Close">✕</button></div>
-    <div class="modal-body">${bodyHTML}</div></div></div>`;
-  const close = ()=>{ root.innerHTML=''; };
+    <div class="modal-body"></div></div></div>`;
+  root.querySelector('.modal-body').innerHTML=String(bodyHTML||'');
+  let closed = false;
+  const close = ()=>{
+    if(closed) return; closed = true;
+    document.removeEventListener('keydown', keydown, true);
+    root.innerHTML='';
+    if(previous && typeof previous.focus === 'function' && document.contains(previous)) previous.focus();
+  };
+  const keydown = e=>{
+    if(e.key === 'Escape'){ e.preventDefault(); close(); return; }
+    if(e.key !== 'Tab') return;
+    const focusable = [...root.querySelectorAll('button,input,textarea,select,[href],[tabindex]:not([tabindex="-1"])')].filter(el=>!el.disabled);
+    if(!focusable.length) return;
+    const first=focusable[0], last=focusable[focusable.length-1];
+    if(e.shiftKey && document.activeElement===first){ e.preventDefault(); last.focus(); }
+    else if(!e.shiftKey && document.activeElement===last){ e.preventDefault(); first.focus(); }
+  };
   root.querySelector('[data-close]').addEventListener('click', close);
   root.querySelector('.modal-backdrop').addEventListener('mousedown', e=>{ if(e.target.classList.contains('modal-backdrop')) close(); });
-  const escFn = e=>{ if(e.key==='Escape'){ close(); document.removeEventListener('keydown', escFn); } };
-  document.addEventListener('keydown', escFn);
+  document.addEventListener('keydown', keydown, true);
   if(onMount) onMount(root, close);
-  const f = root.querySelector('input,textarea,button'); if(f) f.focus();
+  const f = root.querySelector('input,textarea,button'); if(f) f.focus({preventScroll:true});
   return close;
 }
 
 /* Store — same localStorage key as v1 so analyzed games/settings survive the upgrade */
+const STORAGE_VERSION = 3;
+const DEFAULT_SETTINGS = { username:'IM_AshayRane', reviewMovetime:700, theme:'light', skill:8, color:'w', showEvalInReview:true, boardFlipped:false };
+const SAFE_ID = /^[A-Za-z0-9_-]{1,96}$/;
+const SAFE_UCI = /^[a-h][1-8][a-h][1-8][qrbn]?$/i;
+const UNSAFE_OBJECT_KEYS = new Set(['__proto__','prototype','constructor','toString','valueOf','hasOwnProperty','isPrototypeOf','propertyIsEnumerable','toLocaleString']);
+const CLASSES = new Set(['brilliant','great','best','excellent','good','book','inaccuracy','mistake','blunder','q','?']);
+function defaultState(){
+  return { version:STORAGE_VERSION, settings:{...DEFAULT_SETTINGS}, openingLines:[], analyzed:{}, playbook:null, practiceGames:[] };
+}
+function isRecord(v){ return !!v && typeof v === 'object' && !Array.isArray(v); }
+function boundedInt(v, min, max, fallback){
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+}
+function boundedNumber(v, min, max, fallback){
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, n)) : fallback;
+}
+function safeString(v, max=500){ return typeof v === 'string' ? v.slice(0, max) : ''; }
+function safeRecordKey(value, fallback='record'){
+  const s=safeString(value,500).trim();
+  return s && !UNSAFE_OBJECT_KEYS.has(s) ? s : fallback;
+}
+function normalizeEval(raw){
+  if(!isRecord(raw)) return null;
+  const out = {};
+  // v1 used cpWhite/mate/bestUci; v2 uses the explicit best* names.
+  const cp = raw.bestCpWhite ?? raw.cpWhite;
+  const mate = raw.bestMateWhite ?? raw.mate;
+  const best = raw.best ?? raw.bestUci;
+  if(cp !== null && cp !== undefined) out.bestCpWhite = boundedNumber(cp, -100000, 100000, null);
+  if(mate !== null && mate !== undefined) out.bestMateWhite = boundedNumber(mate, -1000, 1000, null);
+  if(typeof best === 'string' && SAFE_UCI.test(best)) out.best = best.toLowerCase();
+  if(typeof raw.bestPv === 'string' && SAFE_UCI.test(raw.bestPv)) out.bestPv = raw.bestPv;
+  if(typeof raw.secondPv === 'string' && SAFE_UCI.test(raw.secondPv)) out.secondPv = raw.secondPv;
+  return Object.keys(out).length ? out : null;
+}
+function normalizePly(raw, index){
+  if(!isRecord(raw)) throw new Error('Invalid ply record');
+  if(raw.mover != null && raw.mover !== 'w' && raw.mover !== 'b') throw new Error('Invalid ply mover');
+  const fenBefore = safeString(raw.fenBefore, 120);
+  const uci = typeof raw.uci === 'string' && SAFE_UCI.test(raw.uci) ? raw.uci.toLowerCase() : '';
+  const san = safeString(raw.san, 32);
+  if(!fenBefore || !san) throw new Error('Invalid ply record');
+  const evalBefore = normalizeEval(raw.evalBefore ?? raw.evalBeforeActual);
+  const evalAfter = normalizeEval(raw.evalAfter ?? raw.evalAfterActual);
+  const out = {
+    i: boundedInt(raw.i ?? index, 0, 10000, index), san, uci, fenBefore,
+    mover: raw.mover === 'b' ? 'b' : 'w', moveNum: boundedInt(raw.moveNum, 1, 5000, Math.floor(index/2)+1),
+    evalBefore, evalAfter, cls: CLASSES.has(raw.cls) ? raw.cls : '?', delta: raw.delta == null ? null : boundedNumber(raw.delta, 0, 100, null),
+    wpBefore: raw.wpBefore == null ? null : boundedNumber(raw.wpBefore, 0, 100, null),
+    wpAfter: raw.wpAfter == null ? null : boundedNumber(raw.wpAfter, 0, 100, null),
+    onlyMoveGap: raw.onlyMoveGap == null ? null : boundedNumber(raw.onlyMoveGap, -100000, 100000, null)
+  };
+  if(typeof raw.bestSan === 'string') out.bestSan = safeString(raw.bestSan, 32);
+  if(typeof raw.bestUci === 'string' && SAFE_UCI.test(raw.bestUci)) out.bestUci = raw.bestUci.toLowerCase();
+  if(Number.isFinite(raw.sacPawns)) out.sacPawns = boundedNumber(raw.sacPawns, -100, 100, 0);
+  return out;
+}
+function normalizeSummary(raw){
+  if(!isRecord(raw)) return {};
+  const out={};
+  for(const color of ['white','black']){
+    const side=raw[color]; if(!isRecord(side)) continue;
+    const s={};
+    for(const field of ['accuracy','moves','brilliant','great','best','excellent','good','book','inaccuracy','mistake','blunder']){
+      if(side[field] == null) continue;
+      const n=Number(side[field]);
+      if(Number.isFinite(n)) s[field]=boundedNumber(n, field==='accuracy'?0:0, field==='accuracy'?100:10000, field==='accuracy'?0:0);
+    }
+    if(Object.keys(s).length) out[color]=s;
+  }
+  return out;
+}
+function normalizeRecord(raw, key, strict){
+  if(!isRecord(raw)) throw new Error('Invalid analyzed game');
+    const pgn = safeString(raw.pgn, 200000);
+  if(!pgn) throw new Error('Analyzed game has no PGN');
+  let parsed;
+  try{ parsed = new Chess(); if(!parsed.load_pgn(pgn,{sloppy:true}) || !parsed.history().length) throw new Error('Invalid PGN'); }
+  catch(e){ throw new Error('Analyzed game has invalid PGN'); }
+  const hist = parsed.history({verbose:true});
+  const startFen = pgnStartFen(pgn, parsed.header() || {});
+  const plies = Array.isArray(raw.plies) ? raw.plies.map(normalizePly) : [];
+  if(!plies.length) throw new Error('Analyzed game has no plies');
+  if(plies.length !== hist.length) throw new Error('Analyzed game ply count mismatch');
+  const headers = {};
+  if(isRecord(raw.headers)) for(const h of ['White','Black','WhiteElo','BlackElo','Result','ECO','Date','TimeControl','Termination','Link']) if(raw.headers[h] != null) headers[h] = safeString(raw.headers[h], 200);
+  const summary = normalizeSummary(raw.summary);
+  for(const [i,p] of plies.entries()){
+    const expected = hist[i];
+    if(!expected || p.san !== expected.san || p.mover !== expected.color || !p.uci || sanToUci(new Chess(i ? p.fenBefore : startFen), p.san) !== p.uci) throw new Error('Analyzed game ply mismatch');
+    if(p.evalBefore && p.evalBefore.best && uciToSan(p.fenBefore,p.evalBefore.best) == null) throw new Error('Invalid engine move');
+  }
+  return { key: safeRecordKey(key || raw.key, 'record'), url: typeof raw.url === 'string' ? safeString(raw.url, 1000) : null, pgn, date: safeString(raw.date, 40), headers, plies, summary, movetime: boundedInt(raw.movetime, 100, 10000, 700) };
+}
+function validateState(raw, {strict=true}={}){
+  if(!isRecord(raw)) throw new Error('Invalid application state');
+  const out = defaultState();
+  const inputSettings = isRecord(raw.settings) ? raw.settings : {};
+  if(strict && raw.settings != null && !isRecord(raw.settings)) throw new Error('Invalid settings');
+  const theme = ['light','dark','system'].includes(inputSettings.theme) ? inputSettings.theme : DEFAULT_SETTINGS.theme;
+  const username = safeString(inputSettings.username, 80).trim();
+  out.settings = {
+    username: username || DEFAULT_SETTINGS.username,
+    reviewMovetime: boundedInt(inputSettings.reviewMovetime, 200, 5000, DEFAULT_SETTINGS.reviewMovetime),
+    theme, skill: boundedInt(inputSettings.skill, 0, 20, DEFAULT_SETTINGS.skill),
+    color: inputSettings.color === 'b' ? 'b' : 'w', showEvalInReview: inputSettings.showEvalInReview !== false,
+    boardFlipped: inputSettings.boardFlipped === true || (inputSettings.boardFlipped == null && inputSettings.color === 'b')
+  };
+  if(strict && inputSettings.username != null && typeof inputSettings.username !== 'string') throw new Error('Invalid username');
+  if(raw.openingLines != null && !Array.isArray(raw.openingLines) && strict) throw new Error('Invalid opening lines');
+  if(raw.analyzed != null && !isRecord(raw.analyzed) && strict) throw new Error('Invalid analyzed games');
+  if(raw.practiceGames != null && !Array.isArray(raw.practiceGames) && strict) throw new Error('Invalid practice games');
+  const lines = Array.isArray(raw.openingLines) ? raw.openingLines : [];
+  for(const line of lines){
+    if(!isRecord(line)) { if(strict) throw new Error('Invalid opening line'); continue; }
+    const id = safeString(line.id, 96);
+    if(!SAFE_ID.test(id)) { if(strict) throw new Error('Invalid opening line id'); continue; }
+    const name = safeString(line.name, 120).trim(); const moves = safeString(line.moves, 20000);
+    if(!name && !moves) { if(strict) throw new Error('Invalid opening line'); continue; }
+    let fen = line.fen == null ? null : safeString(line.fen, 120);
+    if(fen){ try{ new Chess(fen); }catch(e){ if(strict) throw new Error('Invalid opening position'); fen=null; } }
+    out.openingLines.push({id, name:name || 'My line', fen, moves, created: boundedInt(line.created, 0, Date.now()+86400000, Date.now())});
+  }
+  const analyzed = isRecord(raw.analyzed) ? raw.analyzed : {};
+  for(const key of Object.keys(analyzed).slice(0,2000)){
+    if(UNSAFE_OBJECT_KEYS.has(key)){ if(strict) throw new Error('Invalid analyzed game key'); continue; }
+    try{ out.analyzed[safeRecordKey(key,'record')] = normalizeRecord(analyzed[key], key, strict); }
+    catch(e){ if(strict) throw e; }
+  }
+  if(raw.playbook != null){
+    if(!isRecord(raw.playbook)) { if(strict) throw new Error('Invalid playbook'); }
+    else {
+      const pbMoves = sanitizeMoves(raw.playbook.moves);
+      const pbFen = safeString(raw.playbook.fen,120);
+      if(pbFen){ try{ new Chess(pbFen); }catch(e){ if(strict) throw new Error('Invalid playbook position'); } }
+      out.playbook = {name:safeString(raw.playbook.name,120), moves:pbMoves.join(' '), fen:pbFen||null, updated:boundedInt(raw.playbook.updated,0,Date.now()+86400000,Date.now())};
+    }
+  }
+  if(Array.isArray(raw.practiceGames)) out.practiceGames = raw.practiceGames.filter(isRecord).slice(0,50).map(g=>{
+    const id=safeString(g.id,96); if(!SAFE_ID.test(id)) return null;
+    const pgn=safeString(g.pgn,200000); if(!pgn) return null;
+    try{ const parsed=new Chess(); if(!parsed.load_pgn(pgn,{sloppy:true}) || !parsed.history().length) return null; }catch(e){ return null; }
+    return {id,date:safeString(g.date,40),pgn,result:safeString(g.result,16)};
+  }).filter(Boolean);
+  if(strict && Array.isArray(raw.practiceGames) && out.practiceGames.length !== Math.min(50, raw.practiceGames.length)) throw new Error('Invalid practice game');
+  return out;
+}
 const Store = {
-  key:'chesslab.v1',
-  state:null,
-  defaults(){ return {
-    version:2,
-    settings:{ username:'IM_AshayRane', reviewMovetime:700, theme:'light', skill:8, color:'w', showEvalInReview:true },
-    openingLines:[],   // {id,name,fen,moves(SAN),created} — user-built only
-    analyzed:{},       // key -> analyzed record (v1-compatible)
-    playbook:null,     // builder session draft
-  };},
+  key:'chesslab.v1', state:null, _saveTimer:null,
+  defaults(){ return defaultState(); },
   load(){
     try{
       const raw = localStorage.getItem(this.key);
-      if(raw) this.state = Object.assign(this.defaults(), JSON.parse(raw));
-      // v1-migrated settings lack v2 keys — backfill so nothing is undefined
-      this.state.settings = Object.assign({ username:'IM_AshayRane', reviewMovetime:700, theme:'light', skill:8, color:'w', showEvalInReview:true }, this.state.settings||{});
-      if(!Array.isArray(this.state.openingLines)) this.state.openingLines = [];
-      if(!this.state.analyzed || typeof this.state.analyzed!=='object') this.state.analyzed = {};
-      // v1→v2 migration: old settings shape had 'depth'
-      if(this.state.settings.depth && !this.state.settings.reviewMovetime){
-        this.state.settings.reviewMovetime = 700;
-      }
-    }catch(e){ console.warn('store load failed', e); }
-    if(!this.state) this.state = this.defaults();
+      this.state = raw ? validateState(JSON.parse(raw), {strict:false}) : defaultState();
+    }catch(e){ console.warn('store load failed — using safe defaults', e); this.state = defaultState(); }
     return this.state;
   },
-  save(){ try{ localStorage.setItem(this.key, JSON.stringify(this.state)); }catch(e){ toast('Could not save — storage full?','err'); } },
-  reset(){ this.state = this.defaults(); this.save(); }
+  save({immediate=false}={}){
+    clearTimeout(this._saveTimer);
+    const write = ()=>{ try{ localStorage.setItem(this.key, JSON.stringify(this.state)); }catch(e){ toast('Could not save — storage full?','err'); } };
+    if(immediate) write(); else this._saveTimer = setTimeout(write, 180);
+  },
+  flush(){ clearTimeout(this._saveTimer); try{ localStorage.setItem(this.key, JSON.stringify(this.state)); }catch(e){ toast('Could not save — storage full?','err'); } },
+  reset(){ this.state = defaultState(); this.save({immediate:true}); }
 };
 
 function applyTheme(){
@@ -300,31 +456,39 @@ function applyTheme(){
 const Engine = {
   worker:null, ready:false, offline:false, status:'loading',
   _queue:[], _busy:false, _cur:null, _gotUciOk:false, _hsTimer:null, _srcIdx:-1,
+  _generation:0, _sourceGeneration:-1, _searchId:0, _stopTimer:null,
   SOURCES:[
     'https://unpkg.com/stockfish@18.0.8/bin/stockfish-18-asm.js',
     'https://cdn.jsdelivr.net/npm/stockfish@18.0.8/bin/stockfish-18-asm.js',
     'https://cdn.jsdelivr.net/npm/stockfish@10.0.2/src/stockfish.js',
   ],
-  start(){ this._try(0); },
-  _flushPending(){
-    if(this._cur){ const c=this._cur; this._cur=null; this._busy=false; try{ c.resolve(null); }catch(e){} }
-    const q=this._queue.splice(0);
-    for(const t of q){ try{ t.resolve(null); }catch(e){} }
+  start(){ if(this.status !== 'loading' || this.worker) return; this._try(0); },
+  _flushPending(error){
+    clearTimeout(this._stopTimer);
+    const rejectTask = t=>{
+      if(t._settled) return;
+      if(t.play) this._settle(t, null); else this._settle(t, null, error || new Error('Engine restarted'));
+    };
+    if(this._cur){ const c=this._cur; this._cur=null; this._busy=false; rejectTask(c); }
+    const q=this._queue.splice(0); for(const t of q) rejectTask(t);
   },
   _try(idx){
     clearTimeout(this._hsTimer);
-    if(this.worker){ try{ this.worker.terminate(); }catch(e){} this.worker=null; }
-    this._flushPending();   // never leave queued/in-flight analysis or play tasks stalled
+    this.ready=false; this.offline=false; this._gotUciOk=false;
+    const old=this.worker; this.worker=null; if(old){ try{ old.terminate(); }catch(e){} }
+    this._flushPending(new Error('Engine worker restarted'));
+    this._busy=false; this._cur=null;
     if(idx >= this.SOURCES.length){ this.offline=true; this.status='offline'; App.onEngineStatus(); return; }
-    this._srcIdx = idx; this._gotUciOk=false; this.status='loading';
+    this._srcIdx=idx; this.status='loading'; this._generation++;
+    const generation=this._generation; this._sourceGeneration=generation;
     const blobSrc = `try{ importScripts(${JSON.stringify(this.SOURCES[idx])}); }catch(err){ self.postMessage('__fatal:'+String(err)); }`;
     let worker;
     try{ worker = new Worker(URL.createObjectURL(new Blob([blobSrc],{type:'text/javascript'}))); }
     catch(e){ this._try(idx+1); return; }
-    worker.onmessage = e=>this._onMsg(e);
-    worker.onerror = ()=>this._try(idx+1);
+    worker.onmessage = e=>{ if(generation !== this._generation || worker !== this.worker) return; this._onMsg(e); };
+    worker.onerror = ()=>{ if(generation === this._generation) this._try(idx+1); };
     this.worker = worker;
-    this._hsTimer = setTimeout(()=>{ if(!this.ready) this._try(idx+1); }, 25000);
+    this._hsTimer = setTimeout(()=>{ if(generation === this._generation && !this.ready) this._try(idx+1); }, 25000);
     worker.postMessage('uci');
   },
   _onMsg(e){
@@ -338,10 +502,11 @@ const Engine = {
       this.worker.postMessage('isready');
       return;
     }
-    if(line.startsWith('readyok') && !this.ready){
+    if(line.startsWith('readyok') && this._gotUciOk && !this.ready){
       clearTimeout(this._hsTimer);
       this.ready = true; this.status = 'ready';
       App.onEngineStatus();
+      this._pump();
       return;
     }
     this._dispatch(line);
@@ -350,29 +515,66 @@ const Engine = {
      {moves:[{uci,cpWhite,mate,depth}], best, bestCpWhite, secondCpWhite} */
   _queue:[], _busy:false,
   analyse(fen, movetime=700, multiPV=2){
-    return new Promise(resolve=>{
-      this._queue.push({fen, movetime, multiPV, resolve});
+    return new Promise((resolve,reject)=>{
+      this._queue.push({fen, movetime, multiPV, resolve, reject, kind:'analysis'});
       this._pump();
     });
   },
   _pump(){
     if(this._busy || !this._queue.length) return;
-    if(this.offline || !this.worker){ const t=this._queue.shift(); t.resolve(null); this._pump(); return; }
+    if(this.offline || !this.worker || !this.ready){
+      if(this.offline){ const t=this._queue.shift(); t.reject ? t.reject(new Error('Engine offline')) : t.resolve(null); this._pump(); }
+      return;
+    }
     this._busy = true;
-    const t = this._queue.shift();
-    this._cur = t;
-    this.worker.postMessage('position fen '+t.fen);
-    this.worker.postMessage('go movetime '+t.movetime);
+    const t = this._queue.shift(); this._cur = t; t.generation=this._generation; t.searchId=++this._searchId;
+    const timeoutMs = Math.max(5000, Number(t.movetime || 700) * 5 + 2000);
+    t.timeoutId = setTimeout(()=>{
+      if(this._cur !== t) return;
+      this._stopCurrent(t, t.play ? null : new Error('Engine search timed out'), t.play ? null : new Error('Engine search timed out'));
+    }, timeoutMs);
+    try{
+      this.worker.postMessage('setoption name MultiPV value '+(t.play ? 1 : Math.max(1, t.multiPV || 2)));
+      this.worker.postMessage('setoption name Skill Level value '+(t.play ? Math.max(0,Math.min(20,Number(t.skill ?? 8))) : 20));
+      this.worker.postMessage('position fen '+t.fen);
+      this.worker.postMessage('go movetime '+Math.max(1, Number(t.movetime || 700)));
+    }catch(e){ this._finish(t, t.play ? null : e, t.play ? null : e); }
   },
-  _finish(task, result){
-    if(this._cur===task) this._busy=false;
-    this._cur = null;
-    task.resolve(result);
+  _settle(task, result, error){
+    if(task._settled) return;
+    task._settled=true;
+    clearTimeout(task.timeoutId);
+    if(error && task.reject) task.reject(error); else task.resolve(result);
+  },
+  _stopCurrent(task, result, error){
+    if(this._cur !== task) return;
+    this._settle(task, result, error);
+    task._stopping=true;
+    try{ this.worker && this.worker.postMessage('stop'); }catch(e){}
+    this._stopTimer=setTimeout(()=>{ if(this._cur===task) this._finish(task); }, 1000);
+  },
+  _finish(task, result, error){
+    clearTimeout(task.timeoutId);
+    clearTimeout(this._stopTimer);
+    if(this._cur !== task) return;
+    this._cur=null; this._busy=false; task._stopping=false;
+    if(!task._settled) this._settle(task, result, error);
     this._pump();
   },
   _dispatch(line){
     const t = this._cur;
-    if(!t) return;
+    if(!t || t.generation !== this._generation || t.searchId !== this._searchId) return;
+    if(t._stopping){
+      if(line.startsWith('bestmove')) this._finish(t);
+      return;
+    }
+    if(t.play){
+      if(line.startsWith('bestmove')){
+        const best = line.split(/\s+/)[1] || null;
+        this._finish(t, best && best !== '(none)' ? best : null);
+      }
+      return;
+    }
     // parse multipv info lines
     const mMPV = line.match(/\bmultipv (\d+)/);
     const mScore = line.match(/score (cp|mate) (-?\d+)/);
@@ -405,45 +607,26 @@ const Engine = {
       this._finish(t, result);
     }
   },
+  /* Cancel only play-owned work; analysis requests remain queued. */
+  cancelPlay(){
+    if(this._cur && this._cur.play){
+      this._stopCurrent(this._cur, null, null);
+    }
+    this._queue=this._queue.filter(t=>{
+      if(!t.play) return true;
+      this._settle(t, null); return false;
+    });
+    this._pump();
+  },
   /* For play: set Skill Level, then a single-PV search */
   playMove(fen, skill){
-    return new Promise(resolve=>{
-      const t = {fen, movetime:900, resolve, skill, play:true};
-      this._queue.push(t); this._pump();
+    return new Promise((resolve,reject)=>{
+      this._queue.push({fen, movetime:900, resolve, reject, skill, play:true, kind:'play'});
+      this._pump();
     });
   },
 };
-/* play tasks share the dispatch but need Skill Level set before go: wrap _pump */
-const _origPump = Engine._pump.bind(Engine);
-Engine._pump = function(){
-  const next = this._queue[0];
-  if(next && this._busy===false && this.worker){
-    if(next.play && !this._skillSetFor !== false){
-      // set skill before sending go (setoption between go calls is fine)
-      this.worker.postMessage('setoption name Skill Level value '+ (next.skill ?? 8));
-      this.worker.postMessage('setoption name MultiPV value 1');
-    } else if(!next.play){
-      this.worker.postMessage('setoption name MultiPV value 2');
-    }
-  }
-  _origPump();
-};
-/* _dispatch must handle play tasks (single PV, resolve on bestmove) */
-const _origDispatch = Engine._dispatch.bind(Engine);
-Engine._dispatch = function(line){
-  const t = this._cur;
-  if(t && t.play){
-    if(line.startsWith('bestmove')){
-      const best = line.split(/\s+/)[1] || null;
-      this._busy=false; this._cur=null;
-      t.resolve(best);
-      this._pump();
-      return;
-    }
-    return;
-  }
-  _origDispatch(line);
-};
+/* The queue owns the complete task lifecycle: no wrapper may send commands before readiness. */
 
 /* =================== CHESS HELPERS =================== */
 function sanToUci(g, san){
@@ -465,9 +648,9 @@ function materialFor(board, color){
 }
 /* lichess/chess.com win-probability model */
 const WP = cp => 50 + 50*(2/(1+Math.exp(-0.00368208*cp)) - 1);
-function wpWhiteOf(ev){ // ev {cpWhite, bestMateWhite}
+function wpWhiteOf(ev){ // ev {bestCpWhite, bestMateWhite}
   if(!ev) return 50;
-  if(ev.bestMateWhite != null) return ev.bestMateWhite>0 ? 100 : 0;
+  if(ev.bestMateWhite != null) return ev.bestMateWhite>0 ? 100 : ev.bestMateWhite<0 ? 0 : 50;
   return WP(ev.bestCpWhite||0);
 }
 function evalLabel(ev){
@@ -488,6 +671,35 @@ function hashStr(s){ let h=5381; for(let i=0;i<s.length;i++) h=((h<<5)+h+s.charC
    winProb model: lichess conversion; deltas in win% points, mover POV.
    Great move: engine's best is FAR better than its 2nd choice (only-move).
    Brilliant: best move + material sacrifice >= 2 pawns + not already winning. */
+function moverCp(ev, field, mover){
+  if(!ev || ev[field] == null) return null;
+  return mover === 'b' ? -ev[field] : ev[field];
+}
+function materialBeforeAfter(fen, uci, mover){
+  try{
+    const g = new Chess(fen); const before=materialFor(g.board(), mover);
+    const m=g.moves({verbose:true}).find(x=>x.from+x.to+(x.promotion||'')===uci);
+    if(!m) return {before, after:before};
+    g.move({from:m.from,to:m.to,promotion:m.promotion});
+    return {before, after:materialFor(g.board(), mover)};
+  }catch(e){ return {before:null, after:null}; }
+}
+function materialRiskAfter(fen, uci, mover){
+  try{
+    const g = new Chess(fen);
+    const m=g.moves({verbose:true}).find(x=>x.from+x.to+(x.promotion||'')===uci);
+    if(!m) return 0;
+    g.move({from:m.from,to:m.to,promotion:m.promotion});
+    const opponent = mover==='w' ? 'b' : 'w';
+    let risk=0;
+    for(const reply of g.moves({verbose:true})){
+      if(reply.captured && g.get(reply.to) && g.get(reply.to).color===mover){
+        risk=Math.max(risk, pieceVal(reply.captured));
+      }
+    }
+    return risk;
+  }catch(e){ return 0; }
+}
 function classifyPly(ply, prevEval, curEval, mover, moveNum){
   // prevEval: engine result at position BEFORE the move; curEval: result at position AFTER
   if(!isEval(prevEval) || !isEval(curEval)) return {cls:'?', delta:null};
@@ -497,29 +709,17 @@ function classifyPly(ply, prevEval, curEval, mover, moveNum){
   const delta = Math.max(0, Math.round((wpB-wpA)*10)/10);
   const playedUci = ply.uci;
   const bestUci = prevEval.best;
-  const isBest = bestUci && playedUci===bestUci;
-  // material sacrifice check (played vs engine best, mover POV)
-  let matPlayed = null, matBest = null;
-  try{
-    const g1 = new Chess(ply.fenBefore);
-    const v1 = g1.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===playedUci);
-    if(v1){ g1.move({from:v1.from,to:v1.to,promotion:v1.promotion}); matPlayed = materialFor(g1.board(), mover); }
-    if(bestUci){
-      const g2 = new Chess(ply.fenBefore);
-      const v2 = g2.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===bestUci);
-      if(v2){ g2.move({from:v2.from,to:v2.to,promotion:v2.promotion}); matBest = materialFor(g2.board(), mover); }
-    }
-  }catch(e){}
-  const sacPawns = (matPlayed!=null && matBest!=null) ? Math.round((matPlayed-matBest)*10)/10 : 0;
+  const isBest = !!bestUci && playedUci===bestUci;
+  const playedRisk = materialRiskAfter(ply.fenBefore, playedUci, mover);
+  const sacPawns = playedRisk;
+  const bestCpMover = moverCp(prevEval, 'bestCpWhite', mover);
+  const secondCpMover = moverCp(prevEval, 'secondCpWhite', mover);
+  const onlyMoveGap = bestCpMover!=null && secondCpMover!=null ? bestCpMover-secondCpMover : null;
 
   let cls;
   if(isBest){
-    if(sacPawns <= -2 && delta <= 2 && wpB >= 35 && wpB <= 85) cls = 'brilliant';
-    else if(prevEval.secondCpWhite != null && prevEval.bestCpWhite != null &&
-            (prevEval.bestCpWhite - prevEval.secondCpWhite) >= 100 &&
-            !sacPawns && moveNum >= 2){
-      cls = 'great'; // only-move: 2nd best is ≥1 pawn worse
-    }
+    if(sacPawns >= 2 && delta <= 2 && wpB >= 35 && wpB <= 85) cls = 'brilliant';
+    else if(onlyMoveGap != null && onlyMoveGap >= 100 && moveNum >= 2) cls = 'great';
     else cls = 'best';
   }
   else if(delta <= 2) cls = 'excellent';
@@ -527,43 +727,56 @@ function classifyPly(ply, prevEval, curEval, mover, moveNum){
   else if(delta <= 10) cls = 'inaccuracy';
   else if(delta <= 20) cls = 'mistake';
   else cls = 'blunder';
-  // book: opening moves matching theory-speed accuracy
-  if(moveNum <= 4 && delta <= 2 && (cls==='excellent'||cls==='good')) cls = 'book';
-  return {cls, delta, wpBefore:Math.round(wpB*10)/10, wpAfter:Math.round(wpA*10)/10, sacPawns};
+  // "Book" requires an opening database; do not invent a classification from ply number.
+  return {cls, delta, wpBefore:Math.round(wpB*10)/10, wpAfter:Math.round(wpA*10)/10, sacPawns, onlyMoveGap};
 }
 
 /* =================== ANALYSIS PIPELINE =================== */
+function pgnStartFen(pgn, headers){
+  const raw = headers && typeof headers.FEN==='string' ? headers.FEN : (String(pgn||'').match(/\[FEN\s+"([^"]+)"\]/i)||[])[1];
+  if(!raw) return new Chess().fen();
+  const fen=safeString(raw,120);
+  try{ return new Chess(fen).fen(); }catch(e){ throw new Error('Invalid PGN start position'); }
+}
 async function analyzeGame(pgn, { movetime=700, onProgress=()=>{}, isCancelled=()=>false } = {}){
   const g = new Chess();
   if(!g.load_pgn(pgn, {sloppy:true})) throw new Error('Could not parse PGN');
   const headers = g.header() || {};
+  const startFen = pgnStartFen(pgn, headers);
+  const rep = new Chess(startFen);
   const hist = g.history({verbose:true});
   if(!hist.length) throw new Error('No moves in game');
-
-  // replay: per-ply records
-  const rep = new Chess();
   const plies = [];
   for(let i=0;i<hist.length;i++){
     const m = hist[i];
     const fenBefore = rep.fen();
     const uci = sanToUci(rep, m.san);
     const mv = rep.moves({verbose:true}).find(x=>x.san===m.san);
-    if(mv) rep.move({from:mv.from,to:mv.to,promotion:mv.promotion});
+    if(!uci || !mv) throw new Error('Could not replay PGN at move '+(i+1));
+    rep.move({from:mv.from,to:mv.to,promotion:mv.promotion});
     pliesPush();
     function pliesPush(){
       plies.push({ i, san:m.san, uci, fenBefore, mover:m.color, moveNum:Math.floor(i/2)+1,
                    evalBefore:null, evalAfter:null, cls:'?', delta:null });
     }
   }
-  // engine pass: position i analysed ONCE; ply i's "after" = analysis of position i+1
-  // so we analyse positions 0..N (N = plies.length); the last position too (game-end eval).
+  // engine pass: analyse positions 0..N. A terminal final position is represented
+  // explicitly so a checkmating move is never left as an unknown classification.
   const positions = plies.map(p=>p.fenBefore);
-  positions.push(rep.fen()); // final position
+  positions.push(rep.fen());
   let done = 0;
   const results = new Array(positions.length).fill(null);
   for(let i=0;i<positions.length;i++){
-    if(App.analysisCancelled) throw new Error('cancelled');
-    results[i] = await Engine.analyse(positions[i], movetime, 2);
+    if(isCancelled()) throw new Error('cancelled');
+    const terminal = new Chess(positions[i]);
+    if(terminal.in_checkmate()){
+      results[i] = {best:null, bestCpWhite:null, bestMateWhite:terminal.turn()==='w' ? -1 : 1};
+    }else if(terminal.in_draw() || terminal.in_stalemate() || terminal.insufficient_material()){
+      results[i] = {best:null, bestCpWhite:0, bestMateWhite:null};
+    }else{
+      results[i] = await Engine.analyse(positions[i], movetime, 2);
+      if(!isEval(results[i])) throw new Error('Engine returned no evaluation for position '+(i+1));
+    }
     onProgress(i+1, positions.length);
   }
   for(let i=0;i<plies.length;i++){
@@ -573,15 +786,17 @@ async function analyzeGame(pgn, { movetime=700, onProgress=()=>{}, isCancelled=(
     plies[i].evalAfter = curEval;
     if(prevEval && prevEval.best){
       const bs = uciToSan(plies[i].fenBefore, prevEval.best);
+      if(!bs) throw new Error('Invalid best move at move '+(i+1));
       plies[i].bestSan = bs;
       plies[i].bestUci = prevEval.best;
     }
     if(isEval(prevEval) && isEval(curEval)){
       const c = classifyPly(plies[i], prevEval, curEval, plies[i].mover, plies[i].moveNum);
       Object.assign(plies[i], c);
+      if(plies[i].cls === '?') throw new Error('Incomplete analysis at move '+(i+1));
       plies[i].evalAfterShown = { bestCpWhite:curEval.bestCpWhite, bestMateWhite:curEval.bestMateWhite };
     } else {
-      plies[i].cls = '?';
+      throw new Error('Incomplete analysis at move '+(i+1));
     }
   }
   const summarize = color=>{
@@ -631,6 +846,9 @@ const Board = {
   interactive:false, onUserMove:null, color:'w',
   lastMove:null, bestMove:null,
   init(el, chess, {color='w', interactive=false}={}){
+    el.setAttribute('role','grid'); el.setAttribute('aria-label','Chess board'); el.setAttribute('aria-rowcount','8'); el.setAttribute('aria-colcount','8'); el.setAttribute('tabindex','0');
+    const sameEl = this.el === el;
+    if(!sameEl) this._teardownEvents();
     this.el = el;
     this.color = color;
     this.interactive = interactive;
@@ -652,7 +870,8 @@ const Board = {
     for(let r=0;r<8;r++) for(let c2=0;c2<8;c2++){
       const dark = (r+c2)%2===1;
       const file = 'abcdefgh'[c2], rank = 8-r;
-      layer.innerHTML += `<div class="sq ${dark?'d':'l'}" data-sq="${file}${rank}"></div>`;
+      const sq = file+rank;
+      layer.innerHTML += `<div class="sq ${dark?'d':'l'}" data-sq="${sq}" role="gridcell" aria-label="${sq}" tabindex="-1"></div>`;
     }
     this.el.appendChild(layer);
   },
@@ -755,6 +974,7 @@ const Board = {
       this.el.appendChild(layer);
     }
     let html = '';
+    this.el.querySelectorAll('.sq').forEach(sqEl=>sqEl.removeAttribute('aria-selected'));
     if(this.lastMove){
       for(const sq of [this.lastMove.from, this.lastMove.to]){
         const {x,y} = this._xy(sq);
@@ -764,6 +984,8 @@ const Board = {
     if(this.selected){
       const {x,y} = this._xy(this.selected);
       html += `<div class="hl-sel" style="left:${x*12.5}%;top:${y*12.5}%;width:12.5%;height:12.5%"></div>`;
+      const selectedEl=this.el.querySelector(`.sq[data-sq="${this.selected}"]`);
+      if(selectedEl) selectedEl.setAttribute('aria-selected','true');
     }
     if(this.selected){
       for(const m of this.chess.moves({square:this.selected, verbose:true})){
@@ -800,7 +1022,28 @@ const Board = {
       al.style.display='';
     } else al.style.display='none';
   },
+  _teardownEvents(){
+    if(this._boundEl && this._handlers) for(const [type, fn, opts] of this._handlers) this._boundEl.removeEventListener(type, fn, opts);
+    this._boundEl=null; this._eventsBound=false; this._handlers=null; this._keyboardHandler=null; this._drag=null;
+  },
   _bindEvents(){
+    if(this._eventsBound && this._boundEl === this.el) return;
+    this._teardownEvents();
+    this._eventsBound=true; this._boundEl=this.el;
+    this._handlers=[];
+    const listen=(type, fn, opts)=>{ this.el.addEventListener(type, fn, opts); this._handlers.push([type, fn, opts]); };
+    this.el.setAttribute('tabindex','0');
+    const keyboardHandler = e=>{
+      if(!this.interactive || !this.selected) return;
+      const dirs={ArrowUp:[0,-1],ArrowDown:[0,1],ArrowLeft:[-1,0],ArrowRight:[1,0]};
+      const d=dirs[e.key]; if(!d) return;
+      e.preventDefault();
+      const f='abcdefgh'.indexOf(this.selected[0]), r=+this.selected[1];
+      const nf=Math.max(0,Math.min(7,f+d[0])), nr=Math.max(1,Math.min(8,r+d[1]));
+      this._onSquare('abcdefgh'[nf]+nr);
+    };
+    this._keyboardHandler=keyboardHandler;
+    this._handlers.push(['keydown',keyboardHandler,undefined]);
     const sqFromEvent = e=>{
       const rect = this.el.getBoundingClientRect();
       const x = Math.floor((e.clientX-rect.left)/rect.width*8);
@@ -811,7 +1054,7 @@ const Board = {
       return f+r;
     };
     this._sqFromEvent = sqFromEvent;
-    this.el.addEventListener('click', e=>{
+    listen('click', e=>{
       if(!this.interactive) return;
       if(this._suppressClick && Date.now()-this._suppressClick < 150) return;
       try{
@@ -821,7 +1064,7 @@ const Board = {
       }catch(err){ this._reportErr(err); }
     });
     /* ---- drag & drop ---- */
-    this.el.addEventListener('pointerdown', e=>{
+    listen('pointerdown', e=>{
       if(!this.interactive || this._drag) return;
       if(e.button!==undefined && e.button!==0 && e.pointerType==='mouse') return;
       try{
@@ -840,7 +1083,7 @@ const Board = {
         this._renderOverlays();
       }catch(err){ this._reportErr(err); }
     });
-    this.el.addEventListener('pointermove', e=>{
+    listen('pointermove', e=>{
       if(!this._drag) return;
       try{
         const rect = this.el.getBoundingClientRect();
@@ -871,8 +1114,8 @@ const Board = {
         }
       }catch(err){ this._reportErr(err); }
     };
-    this.el.addEventListener('pointerup', finishDrag);
-    this.el.addEventListener('pointercancel', finishDrag);
+    listen('pointerup', finishDrag);
+    listen('pointercancel', finishDrag);
   },
   _reportErr(err){
     try{
@@ -888,6 +1131,8 @@ const Board = {
   },
   _onSquare(sq){
     // external hook (view decides legality)
+    const target=this.el && this.el.querySelector(`.sq[data-sq="${sq}"]`);
+    if(target) target.focus({preventScroll:true});
     if(this.onSquare) this.onSquare(sq);
   },
 };
@@ -897,43 +1142,65 @@ const Board = {
 'use strict';
 /* =================== PLAY (continued) + BUILDER + REVIEW + PROGRESS + SETTINGS + WIRING =================== */
 
-/* render hooks used by Board */
-function renderBoardOnly(){ /* live board update without re-rendering the page */ }
-
-/* ---- Play session plumbing ---- */
-function bindPlayEvents(view){
-  const boardEl = view.querySelector('#board');
-  if(boardEl && Play.session){
-    Board.init(boardEl, Play.session.chess, { color: Play.session.color, interactive:true });
-    Board.render();
-  }
-}
-
 /* =================== REVIEW =================== */
 const Review = {
-  data:null, nav:0, scratch:null,
+  data:null, nav:0,
   open(rec){
+    if(!rec || typeof rec.pgn!=='string' || !Array.isArray(rec.plies)){ toast('Could not load game','err'); return; }
     const g = new Chess();
-    if(!g.load_pgn(rec.pgn,{sloppy:true})){ toast('Could not load game','err'); return; }
-    this.data = rec; this.chess = g; this.hist = g.history({verbose:true});
-    this.plys = rec.plies; this.summary = rec.summary; this.headers = rec.headers;
-    this.nav = 0; this.scratch = null;
+    if(!g.load_pgn(rec.pgn,{sloppy:true}) || !Array.isArray(rec.plies) || rec.plies.length !== g.history({verbose:true}).length){ toast('Could not load game','err'); return; }
+    const hist = g.history({verbose:true});
+    for(let i=0;i<hist.length;i++){
+      const p=rec.plies[i];
+      if(!p || p.san!==hist[i].san || p.mover!==hist[i].color || !p.uci || sanToUci(new Chess(p.fenBefore),p.san)!==p.uci){ toast('Could not load game','err'); return; }
+    }
+    this.data = rec; this.chess = g; this.hist = hist; this.startFen = pgnStartFen(rec.pgn, g.header() || {});
+    this.plys = rec.plies; this.summary = rec.summary || {}; this.headers = rec.headers || {};
+    this.nav = 0; this.branch = null; this.flipped = false;
     App.view='review'; render();
   },
+  positionAt(ply){
+    const target=Math.max(0,Math.min(ply,this.hist.length));
+    const g=new Chess(this.startFen || new Chess().fen()); let last=null;
+    for(let i=0;i<target;i++){
+      const vm=g.moves({verbose:true}).find(x=>x.san===this.hist[i].san);
+      if(!vm) break;
+      g.move({from:vm.from,to:vm.to,promotion:vm.promotion});
+      last={from:vm.from,to:vm.to};
+    }
+    return {g,last};
+  },
   boardAt(ply){
-    const g = this.scratch || new Chess();
-    let last=null;
-    if(!this.scratch){
-      for(let i=0;i<ply;i++){
-        const vm = g.moves({verbose:true}).find(x=>x.san===this.hist[i].san);
-        if(vm){ g.move({from:vm.from,to:vm.to,promotion:vm.promotion}); }
-      }
-      if(ply>0){
-        const h = g.history({verbose:true});
-        if(h.length){ last = {from:h[h.length-1].from, to:h[h.length-1].to}; }
+    if(this.branch && ply>=this.branch.basePly){
+      const offset=ply-this.branch.basePly;
+      if(offset<=this.branch.moves.length){
+        const g=new Chess(this.branch.fen); let last=null;
+        for(let i=0;i<offset;i++){ const u=this.branch.moves[i]; const vm=g.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===u); if(vm){g.move({from:vm.from,to:vm.to,promotion:vm.promotion}); last={from:vm.from,to:vm.to};} }
+        return {g,last};
       }
     }
-    return {g, last};
+    return this.positionAt(ply);
+  },
+  setPly(ply){
+    this.nav=Math.max(0,Math.min(ply,this.hist.length));
+    if(this.branch && this.nav!==this.branch.basePly+1) this.branch=null;
+    render();
+  },
+  flip(){ this.flipped=!this.flipped; this.data && render(); },
+  playBest(){
+    if(this.branch && this.nav > this.branch.basePly) return false;
+    const ply=this.plys[this.nav];
+    if(!ply || !ply.bestUci || this.nav>=this.hist.length) return false;
+    const {g}=this.positionAt(this.nav);
+    const vm=g.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===ply.bestUci);
+    if(!vm) return false;
+    const next=new Chess(g.fen()); next.move({from:vm.from,to:vm.to,promotion:vm.promotion});
+    const nextHistory=next.history();
+    const san=nextHistory[nextHistory.length-1];
+    if(!san) return false;
+    const mover=g.turn();
+    this.branch={basePly:this.nav,fen:g.fen(),moves:[ply.bestUci],move:{san,uci:ply.bestUci,mover,moveNum:Math.floor(this.nav/2)+1}};
+    this.nav=this.nav+1; render(); return true;
   },
 };
 function renderReview(){
@@ -952,39 +1219,27 @@ function renderReview(){
   if(imp.loading) list = '<div class="card card-pad muted">Loading your games...</div>';
   else if(imp.error) list = `<div class="banner warn">Could not load games: ${esc(imp.error)} — paste PGN still works.</div>`;
   else if(imp.games){
-    const rows = imp.games.filter(g=>imp.filter==='all'||g.time_class===imp.filter).map(gm=>{
-      const color = myColorOf(gm);
-      const mine = color==='w'?gm.white.result:gm.black.result;
-      const resCls = mine==='win'?'res-win':(['checkmated','resigned','abandoned','timeout','lose'].includes(mine)?'res-loss':'res-draw');
-      const opp = color==='w'?gm.black:gm.white;
-      const d = new Date(gm.end_time*1000);
-      const analyzed = !!Store.state.analyzed[gm.url];
+    const visibleGames = imp.games.filter(g=>imp.filter==='all'||g.time_class===imp.filter);
+    const rows = visibleGames.map(gm=>{
+      const color=myColorOf(gm); const opp=color==='w'?gm.black:gm.white; if(!opp) return '';
+      const idx=imp.games.indexOf(gm);
       return `<label class="gm-row" style="cursor:default">
-        <input type="checkbox" data-gm="${imp.games.indexOf(gm)}" ${imp.selected.has(imp.games.indexOf(gm))?'checked':''}>
-        <span class="faint">${new Date(gm.end_time*1000).toLocaleDateString(undefined,{month:'short',day:'numeric'})}</span>
+        <input type="checkbox" data-gm="${idx}" ${imp.selected.has(idx)?'checked':''}>
         <span class="small" style="width:12px;height:12px;border-radius:3px;background:${color==='w'?'#fff':'#312e2b'};border:1px solid var(--border)"></span>
-        <span style="flex:1">vs <b>${esc(opp.username)}</b> <span class="faint">(${opp.rating||'?'})</span></span>
-        <span class="chip">${gm.time_class}</span>
-        <span class="${mine==='win'?'res-win':(mine==='win'?'':'res-loss')}">${mine==='win'?'Win':(mine==='win'?'':'Draw/Loss')}</span>
-        ${analyzed?'<span class="chip">✓ analyzed</span>':''}
+        <span style="flex:1">vs <b>${esc(opp.username||'?')}</b> <span class="faint">(${esc(String(opp.rating||'?'))})</span></span>
+        <span class="chip">${esc(gm.time_class||'unknown')}</span>
+        ${gm.url && Object.prototype.hasOwnProperty.call(Store.state.analyzed,gm.url)?'<span class="chip">✓</span>':''}
       </label>`;
     }).join('');
     list = `<div class="card">
       <div style="display:flex;gap:8px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--border-soft);flex-wrap:wrap">
-        <button class="icon-btn" data-act="prev-month">◀</button>
-        <b>${MONTH_NAMES[imp.month]} ${imp.year}</b>
-        <button class="icon-btn" data-act="next-month">▶</button>
+        <button class="icon-btn" data-act="prev-month" aria-label="Previous month">◀</button>
+        <b>${esc(MONTH_NAMES[imp.month]||'')} ${esc(String(imp.year||''))}</b>
+        <button class="icon-btn" data-act="next-month" aria-label="Next month">▶</button>
         <span style="flex:1"></span>
         <div class="seg">${['all','rapid','blitz','bullet'].map(f=>`<button data-tc="${f}" aria-pressed="${imp.filter===f}">${f}</button>`).join('')}</div>
       </div>
-      ${(imp.games.filter(g=>imp.filter==='all'||g.time_class===imp.filter).map(gm=>gm).length? '':'<p class="muted small" style="padding:14px">No games this month.</p>')}
-      ${imp.games.filter(g=>imp.filter==='all'||g.time_class===imp.filter).map(gm=>`<label class="gm-row" style="cursor:default">
-        <input type="checkbox" data-gm="${imp.games.indexOf(gm)}" ${imp.selected.has(imp.games.indexOf(gm))?'checked':''}>
-        <span class="small" style="width:12px;height:12px;border-radius:3px;background:${(myColorOf(gm)==='w'?'#fff':'#312e2b')};border:1px solid var(--border)"></span>
-        <span style="flex:1">vs <b>${esc((myColorOf(gm)==='w'?gm.black:gm.white).username)}</b> <span class="faint">(${(myColorOf(gm)==='w'?gm.black:gm.white).rating||'?'})</span></span>
-        <span class="chip">${gm.time_class}</span>
-        ${Store.state.analyzed[gm.url]?'<span class="chip">✓</span>':''}
-      </label>`).join('')}
+      ${visibleGames.length?rows:'<p class="muted small" style="padding:14px">No games this month.</p>'}
     </div>
     <div class="mt-14" style="display:flex;justify-content:space-between;align-items:center">
       <span class="small muted">${imp.selected.size} selected</span>
@@ -1011,44 +1266,43 @@ function renderReview(){
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 function myColorOf(gm){
   const u = Store.state.settings.username.toLowerCase();
-  if(gm.white && gm.white.username && gm.white.username.toLowerCase()===u) return 'w';
-  if(gm.black && gm.black.username && gm.black.username.toLowerCase()===u) return 'b';
+  if(gm?.white && typeof gm.white.username==='string' && gm.white.username.toLowerCase()===u) return 'w';
+  if(gm?.black && typeof gm.black.username==='string' && gm.black.username.toLowerCase()===u) return 'b';
   return null;
 }
 function myColorOfHeaders(h){
   const u = Store.state.settings.username.toLowerCase();
-  if((h.White||'').toLowerCase()===u) return 'w';
-  if((h.Black||'').toLowerCase()===u) return 'b';
+  const white=String(h?.White||'').toLowerCase(), black=String(h?.Black||'').toLowerCase();
+  if(white===u) return 'w';
+  if(black===u) return 'b';
   return null;
 }
 function renderReviewReport(){
   const R = Review;
   const ply = Math.min(R.nav, R.hist.length);
   const {g, last} = Review.boardAt(ply);
-  const curPly = ply>0 ? R.plys[ply-1] : null;
-  const nextPly = ply<R.plys.length ? R.plys[ply] : null;
-  const ev = nextPly ? nextPly.evalBefore : (R.plys[R.plys.length-1] ? R.plys[R.plys.length-1].evalAfter : null);
+  const branchMove = R.branch && ply===R.branch.basePly+1 ? R.branch.move : null;
+  const curPly = branchMove || (ply>0 ? R.plys[ply-1] : null);
+  const nextPly = branchMove ? null : (ply<R.plys.length ? R.plys[ply] : null);
+  const ev = nextPly ? nextPly.evalBefore : (curPly && curPly.evalAfter) || (R.plys[R.plys.length-1] ? R.plys[R.plys.length-1].evalAfter : null);
   const wp = ev && isEval(ev) ? wpWhiteOf({bestCpWhite:ev.bestCpWhite, bestMateWhite:ev.bestMateWhite}) : 50;
-  const bestUci = nextPly ? nextPly.bestUci : null;
-  let checkSq=null;
-  if(g.in_check()){
-    const b=g.board();
-    for(let r=0;r<8;r++)for(let c2=0;c2<8;c2++){const s=b[r][c2]; if(s&&s.type==='k'&&s.color===g.turn()) checkSq='abcdefgh'[c2]+(8-r);}
-  }
+  const showEval = Store.state.settings.showEvalInReview !== false;
   const myColor = myColorOfHeaders(R.headers||{});
   const h = R.headers||{};
   const CLS_LABEL = {brilliant:'Brilliant',great:'Great',best:'Best',excellent:'Excellent',good:'Good',book:'Book',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',q:'?'};
   let detail = '<p class="small muted">Start position — use arrows or click a move.</p>';
-  if(curPly){
+  if(branchMove){
+    detail = `<p class="small"><b>Best line:</b> ${branchMove.moveNum}${branchMove.mover==='w'?'.':'...'} ${esc(branchMove.san)}</p>`;
+  }else if(curPly){
     const cls = curPly.cls||'q';
     detail = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <span class="cls-badge"><i class="cls-dot cls-${cls||'q'}"></i>${CLS_LABEL[cls]||'?'}</span>
+      <span class="cls-badge"><i class="cls-dot cls-${cls}"></i>${CLS_LABEL[cls]||'?'}</span>
       <b>${curPly.moveNum}${curPly.mover==='w'?'.':'...'} ${esc(curPly.san)}</b></div>`;
     if(cls!=='?'){
       detail += `<p class="small muted mt-8">Best: <b>${esc(curPly.bestSan||'?')}</b>${curPly.bestUci===curPly.uci?' (this move)':''}</p>
         <p class="small">Eval: ${evalLabel(curPly.evalBefore)} → ${evalLabel(curPly.evalAfter)}</p>
         ${curPly.delta>0?`<p class="small" style="color:${curPly.delta>20?'var(--blun)':curPly.delta>10?'var(--mist)':'var(--inac)'}">You lost ${curPly.delta}% win chance</p>`:''}
-        ${curPly.sacPawns<=-2?`<p class="small faint">Material invested: ${Math.abs(curPly.sacPawns)} pawns</p>`:''}`;
+        ${curPly.sacPawns>=2?`<p class="small faint">Material invested: ${curPly.sacPawns} pawns</p>`:''}`;
     }
   }
   const mySum = myColor && R.summary ? R.summary[myColor] : null;
@@ -1060,6 +1314,7 @@ function renderReviewReport(){
       ${R.hist[i+1]?`<button class="mv${ply===i+2?' cur':''}" data-ply="${i+2}"><span class="mv-dot cls-${b2?b2.cls:'q'}"></span>${esc(R.hist[i+1].san)}</button>`:'<span></span>'}</div>`;
   }
   const res = (h.Result==='1-0')?(myColor==='w'?'Win':'Loss'):(h.Result==='0-1')?(myColor==='b'?'Win':'Loss'):'Draw';
+  void res;
   return `<div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
       <div><h1>${esc(h.White||'?')} vs ${esc(h.Black||'?')}</h1>
       <p class="small muted">${esc(h.Result||'')} · ${esc(h.ECO||'')} · ${esc(h.Date||'')} · depth-time ${Store.state.settings.reviewMovetime}ms</p></div>
@@ -1069,16 +1324,17 @@ function renderReviewReport(){
       <div class="board-col">
         <div class="players-strip"><span class="avatar">${myColor==='b'?'☺':'☺'}</span><span>${esc(h.White||'?')} (${esc(h.WhiteElo||'?')}) — ${esc(h.Black||'?')} (${esc(h.BlackElo||'?')})</span></div>
         <div class="board-row" style="display:flex;gap:10px">
-          <div class="evalbar" style="align-self:stretch"><i class="white" style="height:${wp}%"></i></div>
-          <div id="review-board" style="flex:1"></div>
+        ${showEval?`<div class="evalbar" style="align-self:stretch"><i class="white" style="height:${wp}%"></i></div>`:''}
+        <div id="review-board" style="flex:1"></div>
         </div>
-        <div class="eval-num">${evalLabel(ev)}</div>
+        ${showEval?`<div class="eval-num">${evalLabel(ev)}</div>`:''}
         <div class="review-ctl">
           <button class="ctl" data-act="nav-start" aria-label="Start">⏮</button>
           <button class="ctl" data-act="nav-prev" aria-label="Previous">◀</button>
           <button class="ctl" data-act="nav-next" aria-label="Next">▶</button>
           <button class="ctl" data-act="nav-end" aria-label="End">⏭</button>
-          ${bestUci?`<button class="ctl" data-act="play-best" title="Play best move">✓</button>`:''}
+          <button class="ctl" data-act="play-best" aria-label="Play best move" title="Play best move">✓</button>
+      <button class="ctl" data-act="flip-review" aria-label="Flip board" title="Flip board">↕</button>
         </div>
       </div>
       <div class="panel">
@@ -1157,6 +1413,11 @@ function renderSettings(){
           <input type="range" id="s-skill" min="0" max="20" value="${s.skill}" style="width:100%;accent-color:var(--green)"></div>
       </div>
       <div class="card card-pad">
+        <h2 style="font-size:15px;margin-bottom:12px">Display</h2>
+        <div class="field"><label><input type="checkbox" data-setting="showEvalInReview" ${s.showEvalInReview?'checked':''}> Show evaluation bar in review</label></div>
+        <div class="field"><label>Board orientation</label><select class="input" data-setting="boardFlipped"><option value="0" ${!s.boardFlipped?'selected':''}>White at bottom</option><option value="1" ${s.boardFlipped?'selected':''}>Black at bottom</option></select></div>
+      </div>
+      <div class="card card-pad">
         <h2 style="font-size:15px;margin-bottom:12px">Data</h2>
         <p class="small muted mb-8">${Object.keys(Store.state.analyzed).length} analyzed games · ${Store.state.openingLines.length} saved lines</p>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1179,46 +1440,31 @@ function sanitizeMoves(text){
   s = s.replace(/\d+\s*\.{1,3}(\.\.)?/g,' ');
   return s.split(/[\s,]+/).filter(t=>t && /^[a-zA-Z0-9+#=\-]+$/.test(t));
 }
-function playLineOn(g, tokens){
-  for(let i=0;i<tokens.length;i++){
-    const tok = tokens[i];
-    let mv=null;
-    try{ mv = g.move(tok); }catch(e){ mv=null; }
-    if(!mv && /^[a-h][1-8][a-h][1-8][qrbn]?$/.test(tok)){
-      mv = g.move({from:tok.slice(0,2), to:tok.slice(2,4), promotion:tok[4]||undefined});
-    }
-    if(!mv) return {error:`Move ${Math.floor(i/2)+1}${i%2?'...':'.'} "${tok}" is not legal here.`};
-  }
-  return {};
-}
-
 /* ---- board mounting helpers ---- */
 function mountPlayBoard(){
+  const S=Play.session;
   const el = $('#board');
-  if(!el || !Play.session) return;
-  Board.init(el, Play.session.chess, { color: Play.session.color, interactive:true });
-  const hist = Play.session.chess.history({verbose:true});
+  if(!el || !S) return;
+  Board.init(el, S.chess, { color: S.flipped ? (S.color==='w'?'b':'w') : S.color, interactive:true });
+  const hist = S.chess.history({verbose:true});
   Board.render({ lastMove: hist.length? {from:hist[hist.length-1].from,to:hist[hist.length-1].to}:null });
   Board.onSquare = null;
   Board._onSquare = function(sq){
-    const S = Play.session;
-    if(!S || S.finished || Play._thinking) return;
-    if(S.chess.turn()!==S.color) return;
+    const current = Play.session;
+    if(!current || current.finished || Play._thinking) return;
+    if(current.chess.turn()!==current.color) return;
     if(Board.selected){
-      const mv = S.chess.moves({verbose:true}).find(m=>m.from===Board.selected && m.to===sq);
+      const mv = current.chess.moves({verbose:true}).find(m=>m.from===Board.selected && m.to===sq);
       if(mv){
         Play.userPlay(Board.selected, sq);
         Board.selected = null;
         mountPlayBoard();
         return;
       }
-      const own = S.chess.moves({verbose:true}).some(m=>m.from===sq);
-      Board.selected = own? sq : null;
-      Board.render();
-      return;
     }
-    const own = S.chess.moves({verbose:true}).some(m=>m.from===sq);
-    if(own){ Board.selected = sq; Board.render(); }
+    const own = current.chess.moves({verbose:true}).some(m=>m.from===sq);
+    Board.selected = own? sq : null;
+    Board.render();
   };
   updatePlayPanels();
 }
@@ -1227,8 +1473,10 @@ function mountBuilderBoard(){
   if(!el) return;
   if(!App.builder) App.builder = {chess:new Chess(), name:''};
   restorePlaybook();
-  Board.init(el, App.builder.chess, { color: Store.state.settings.color, interactive:true });
+  const B = App.builder;
+  Board.init(el, B.chess, { color: Store.state.settings.boardFlipped ? 'b' : 'w', interactive:true });
   Board.render();
+  Board.onSquare = null;
   Board._onSquare = function(sq){
     const B = App.builder;
     if(B.selected){
@@ -1263,26 +1511,33 @@ function mountReviewBoard(){
   if(!el || !Review.data) return;
   const ply = Math.min(Review.nav, Review.hist.length);
   const {g} = Review.boardAt(ply);
-  Board.init(el, g, { color: myColorOfHeaders(Review.headers||{})||'w', interactive:false });
-  const nextPly = Review.plys[ply];
-  Board.render({ bestMove: nextPly && nextPly.bestUci ? {from:nextPly.bestUci.slice(0,2), to:nextPly.bestUci.slice(2,4)} : null });
-}
+  const myColor = myColorOfHeaders(Review.headers||{});
+  Board.init(el, g, { color: Review.flipped ? (myColor==='b'?'w':'b') : (myColor||'w'), interactive:false });
+    const nextPly = Review.plys[ply];
+    if(nextPly && nextPly.bestUci){
+      Board.render({ bestMove: {from:nextPly.bestUci.slice(0,2), to:nextPly.bestUci.slice(2,4)} });
+    } else Board.render();
+  }
 
 /* =================== VIEW BINDING =================== */
-let boundView = null;
 function refreshAccountChip(){
   const chip = $('#chip-account'); if(!chip) return;
-  chip.textContent = Store.state.settings.username;
-  Importer.stats(Store.state.settings.username).then(j=>{
+  const username=Store.state.settings.username;
+  const requestId=++App.accountRequestId;
+  chip.textContent = username;
+  Importer.stats(username).then(j=>{
+    if(requestId!==App.accountRequestId || Store.state.settings.username!==username) return;
     if(!j) return;
     const r = j.chess_rapid;
-    if(r && $('#chip-account')) $('#chip-account').innerHTML =
-      '<span class="dot ok"></span>'+esc(Store.state.settings.username)+' · '+r.last.rating+' rapid (peak '+r.best.rating+')';
+    if(r && r.last && r.best && $('#chip-account')){
+      const current=$('#chip-account'); current.textContent='';
+      const dot=document.createElement('span'); dot.className='dot ok'; current.appendChild(dot);
+      current.appendChild(document.createTextNode(username+' · '+String(r.last.rating)+' rapid (peak '+String(r.best.rating)+')'));
+    }
   }).catch(()=>{});
 }
 function bindView(){
   const view = $('#main .view') || $('#main');
-  boundView = view;
   // top chips
   const chips = $('#nav-chips');
   if(!$('#chip-engine')){
@@ -1298,8 +1553,10 @@ function bindView(){
     if(t){ Store.state.settings.theme = t.dataset.theme; Store.save(); applyTheme(); render(); return; }
     const pc = e.target.closest('[data-pcolor]');
     if(pc){ Store.state.settings.color = pc.dataset.pcolor; Store.save(); render(); return; }
+    const tc = e.target.closest('[data-tc]');
+    if(tc){ App.importState.filter=tc.dataset.tc; App.importState.selected.clear(); render(); return; }
     const mvBtn = e.target.closest('[data-ply]');
-    if(mvBtn){ Review.nav = +mvBtn.dataset.ply; Review.scratch=null; render(); return; }
+    if(mvBtn && App.view==='review' && Review.data){ Review.setPly(+mvBtn.dataset.ply); return; }
     const gm = e.target.closest('input[data-gm]');
     if(gm){ const i=+gm.dataset.gm; if(gm.checked) App.importState.selected.add(i); else App.importState.selected.delete(i);
       const btn = document.querySelector('[data-act="analyze-selected"]');
@@ -1313,6 +1570,13 @@ function bindView(){
     if(t.id==='bb-name'){ if(App.builder) App.builder.name = t.value; savePlaybook(); }
     if(t.id==='s-mt'){ $('#s-mt-lab').textContent = t.value+' ms'; Store.state.settings.reviewMovetime=+t.value; Store.save(); }
     if(t.id==='s-skill'){ Store.state.settings.skill=+t.value; Store.save(); }
+    if(t.id==='pf-skill'){ const lab=$('#pf-skill-lab'); if(lab) lab.textContent=skillLabel(+t.value); }
+    if(t.matches && t.matches('[data-setting]')){
+      const key=t.dataset.setting;
+      if(key==='boardFlipped') Store.state.settings[key]=t.value==='1';
+      else if(key==='showEvalInReview') Store.state.settings[key]=t.checked;
+      Store.save();
+    }
   });
   if(document && !document._kb){
     document._kb = true;
@@ -1320,33 +1584,45 @@ function bindView(){
       if(App.view!=='review'||!Review.data) return;
       if(e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
       const h = Review.hist.length;
-      if(e.key==='ArrowRight'){ e.preventDefault(); Review.nav=Math.min(h,Review.nav+1); Review.scratch=null; render(); }
-      if(e.key==='ArrowLeft'){ e.preventDefault(); Review.nav=Math.max(0,Review.nav-1); Review.scratch=null; render(); }
-      if(e.key==='Home'){ e.preventDefault(); Review.nav=0; Review.scratch=null; render(); }
-      if(e.key==='End'){ e.preventDefault(); Review.nav=h; Review.scratch=null; render(); }
+      if(e.key==='ArrowRight'){ e.preventDefault(); Review.setPly(Review.nav+1); }
+      if(e.key==='ArrowLeft'){ e.preventDefault(); Review.setPly(Review.nav-1); }
+      if(e.key==='Home'){ e.preventDefault(); Review.setPly(0); }
+      if(e.key==='End'){ e.preventDefault(); Review.setPly(h); }
     });
   }
 }
-function bindViewOnce(view){ bindView(); }
-
 /* =================== ACTIONS =================== */
 function handleAction(t, e){
   const act = t.dataset.act;
   switch(act){
     case 'start-play': {
       const line = $('#pf-line') ? $('#pf-line').value : '';
-      Play.start({ color:Store.state.settings.color, skill:Store.state.settings.skill, lineMoves:line });
+      const pfSkill = $('#pf-skill');
+      const skill = pfSkill ? Math.max(0, Math.min(20, +pfSkill.value || 0)) : Store.state.settings.skill;
+      Play.start({ color:Store.state.settings.color, skill, lineMoves:line });
       break;
     }
-    case 'new-game': Play.session=null; go('play'); break;
+    case 'new-game': Play.cancel(); go('play'); break;
+    case 'flip-board': {
+      const S=Play.session;
+      if(S){
+        S.flipped=!S.flipped;
+        Board.color=S.flipped ? (S.color==='w'?'b':'w') : S.color;
+        Board.render();
+        const label=document.querySelector('[data-act="flip-board"]');
+        if(label) label.setAttribute('aria-pressed',String(S.flipped));
+      }
+      break;
+    }
     case 'end-play': {
       const S=Play.session;
-      if(S&&!S.finished){ S.finished=true; S.result='loss'; render(); }
+      if(S&&!S.finished) Play.finishSession(S,'loss','resignation');
       break;
     }
     case 'review-play': {
       const S=Play.session;
       if(S&&S.pgn) runAnalysis([{url:null, pgn:S.pgn, time_class:'practice'}], {jumpTo:true});
+      else toast('Finish or resign the game before reviewing it','err');
       break;
     }
     case 'bb-undo': { const B=App.builder; if(B){ B.chess.undo(); Board.selected=null; B.selected=null; savePlaybook(); refreshBuilderUI(); } break; }
@@ -1356,7 +1632,7 @@ function handleAction(t, e){
         B.selected=null; Board.selected=null; savePlaybook(); refreshBuilderUI(); }
       break;
     }
-    case 'bb-flip': { Store.state.settings.color = Store.state.settings.color==='w'?'b':'w'; Store.save(); refreshBuilderUI(); break; }
+    case 'bb-flip': { Store.state.settings.boardFlipped=!Store.state.settings.boardFlipped; Store.save(); refreshBuilderUI(); break; }
     case 'bb-clear': { const B=App.builder; if(B){ B.chess=new Chess(); B.selected=null; Board.selected=null; Store.state.playbook=null; Store.save(); refreshBuilderUI(); } break; }
     case 'bb-save': saveBuilderLine(); break;
     case 'bb-practice': practiceFromChess(); break;
@@ -1372,11 +1648,14 @@ function handleAction(t, e){
     }
     case 'load-games': {
       const now=new Date();
-      App.importState = {year:now.getFullYear(), month:now.getMonth(), games:null, filter:'all', selected:new Set(), loading:true, error:null};
-      render();
-      Importer.month(Store.state.settings.username, App.importState.year, App.importState.month)
-        .then(g=>{ App.importState.games=g; App.importState.loading=false; render(); })
-        .catch(err=>{ App.importState.loading=false; App.importState.error=err.message||String(err); render(); });
+      const requestId = ++App.importRequestId;
+    if(App.importAbort) App.importAbort.abort();
+    const controller = new AbortController(); App.importAbort = controller;
+    App.importState = {year:now.getFullYear(), month:now.getMonth(), games:null, filter:'all', selected:new Set(), loading:true, error:null, requestId};
+    render();
+    Importer.month(Store.state.settings.username, App.importState.year, App.importState.month, controller.signal)
+      .then(g=>{ if(App.importState.requestId!==requestId) return; App.importState.games=g; App.importState.loading=false; render(); })
+      .catch(err=>{ if(err.name==='AbortError' || App.importState.requestId!==requestId) return; App.importState.loading=false; App.importState.error=err.message||String(err); render(); });
       break;
     }
     case 'prev-month': case 'next-month': {
@@ -1384,11 +1663,14 @@ function handleAction(t, e){
       let {year,month}=imp;
       month += act==='prev-month'?-1:1;
       if(month<0){month=11;year--;} if(month>11){month=0;year++;}
-      Object.assign(imp,{year,month,games:null,loading:true,selected:new Set()});
+      Object.assign(imp,{year,month,games:null,loading:true,selected:new Set(),error:null});
+      const requestId=++App.importRequestId;
+      if(App.importAbort) App.importAbort.abort();
+      const controller=new AbortController(); App.importAbort=controller; imp.requestId=requestId;
       render();
-      Importer.month(Store.state.settings.username, year, month)
-        .then(g=>{ imp.games=g; imp.loading=false; render(); })
-        .catch(err=>{ imp.loading=false; imp.error=err.message||String(err); render(); });
+      Importer.month(Store.state.settings.username, year, month, controller.signal)
+        .then(g=>{ if(imp.requestId!==requestId) return; imp.games=g; imp.loading=false; render(); })
+        .catch(err=>{ if(err.name==='AbortError' || imp.requestId!==requestId) return; imp.loading=false; imp.error=err.message||String(err); render(); });
       break;
     }
     case 'analyze-selected': {
@@ -1399,31 +1681,18 @@ function handleAction(t, e){
     }
     case 'paste-pgn': openPasteModal(); break;
     case 'open-analyzed': {
-      const rec = Store.state.analyzed[t.dataset.key];
+      const key = String(t.dataset.key||'');
+      const rec = key && Object.prototype.hasOwnProperty.call(Store.state.analyzed,key) ? Store.state.analyzed[key] : null;
       if(rec) Review.open(rec);
       break;
     }
     case 'back-list': Review.data=null; go('review'); break;
-    case 'nav-start': if(Review.data){Review.nav=0;Review.scratch=null;render();} break;
-    case 'nav-end': if(Review.data){Review.nav=Review.hist.length;Review.scratch=null;render();} break;
-    case 'nav-prev': if(Review.data){Review.nav=Math.max(0,Review.nav-1);Review.scratch=null;render();} break;
-    case 'nav-next': if(Review.data){Review.nav=Math.min(Review.hist.length,Review.nav+1);Review.scratch=null;render();} break;
-    case 'play-best': {
-      const ply = Review.plys[Review.nav];
-      if(ply && ply.bestUci){
-        const rep = new Chess();
-        for(let i=0;i<Review.nav;i++){
-          const vm = rep.moves({verbose:true}).find(x=>x.san===Review.hist[i].san);
-          if(vm) rep.move({from:vm.from,to:vm.to,promotion:vm.promotion});
-        }
-        const vm = rep.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===ply.bestUci);
-        if(vm){ rep.move({from:vm.from,to:vm.to,promotion:vm.promotion}); }
-        Review.scratch = rep;
-        render();
-        toast('Best move played — explore from here (not saved)');
-      }
-      break;
-    }
+    case 'nav-start': if(Review.data) Review.setPly(0); break;
+    case 'nav-end': if(Review.data) Review.setPly(Review.hist.length); break;
+    case 'nav-prev': if(Review.data) Review.setPly(Review.nav-1); break;
+    case 'nav-next': if(Review.data) Review.setPly(Review.nav+1); break;
+    case 'play-best': if(Review.data && !Review.playBest()) toast('No legal best move at this position','err'); break;
+    case 'flip-review': if(Review.data) Review.flip(); break;
     case 'cancel-analysis': App.analysisCancelled = true; break;
     case 'save-settings': {
       const u = $('#s-user').value.trim();
@@ -1441,8 +1710,10 @@ function handleAction(t, e){
       const inp=document.createElement('input'); inp.type='file'; inp.accept='.json';
       inp.onchange=()=>{ const f=inp.files[0]; if(!f)return;
         const r=new FileReader();
-        r.onload=()=>{ try{ const d=JSON.parse(r.result); if(!d.settings) throw 0;
-          Store.state=Object.assign(Store.defaults(),d); Store.save(); applyTheme(); render(); toast('Imported'); }
+        r.onload=()=>{ try{
+          const d=validateState(JSON.parse(r.result), {strict:true});
+          Store.state=d; Store.save({immediate:true}); applyTheme(); render(); toast('Imported');
+        }
           catch(e){ toast('Invalid file','err'); } };
         r.readAsText(f); };
       inp.click(); break;
@@ -1451,7 +1722,7 @@ function handleAction(t, e){
       openModal('Clear all data?','<p class="muted">Deletes analyzed games, saved lines and settings.</p>',(root,close)=>{
         root.querySelector('.modal-body').insertAdjacentHTML('beforeend','<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn btn-ghost btn-sm" data-x>Cancel</button><button class="btn btn-danger btn-sm" id="do-reset">Delete everything</button></div>');
         root.querySelector('[data-x]').addEventListener('click',()=>root.querySelector('[data-close]').click());
-        root.querySelector('#do-reset').addEventListener('click',()=>{ Store.reset(); root.querySelector('.modal-backdrop').remove(); applyTheme(); render(); toast('All data cleared'); });
+        root.querySelector('#do-reset').addEventListener('click',()=>{ Store.reset(); close(); applyTheme(); render(); toast('All data cleared'); });
       });
       break;
     }
@@ -1477,21 +1748,30 @@ async function runAnalysis(list, {jumpTo=false}={}){
   App.analysisCancelled = false;
   const mt = Store.state.settings.reviewMovetime;
   for(const gm of list){
-    const key = gm.url || ('pgn:'+hashStr(gm.pgn));
-    const label = gm.white? (gm.white.username+' vs '+gm.black.username) : 'Pasted game';
+    if(!gm || typeof gm.pgn!=='string' || !gm.pgn.trim()){ toast('Invalid game data','err'); return; }
+    const rawKey = typeof gm.url==='string' ? gm.url : '';
+    const fallbackKey = 'pgn:'+hashStr(gm.pgn);
+    const key = safeRecordKey(rawKey || fallbackKey, fallbackKey);
+    const white = gm.white && typeof gm.white.username==='string' ? gm.white.username : 'Unknown';
+    const black = gm.black && typeof gm.black.username==='string' ? gm.black.username : 'Unknown';
+    const label = gm.white || gm.black ? white+' vs '+black : 'Pasted game';
+    const rawDate = Number(gm.end_time);
+    const date = Number.isFinite(rawDate) && Math.abs(rawDate) <= 8640000000000
+      ? new Date(rawDate*1000).toISOString().slice(0,10) : new Date().toISOString().slice(0,10);
     App.analyzing = {label, done:0, total:1};
     App.view='review'; render();
     try{
-      const res = await analyzeGame(gm.pgn, {
-        movetime: mt,
-        onProgress:(d,tot)=>{ App.analyzing.done=d; App.analyzing.total=mt? tot:tot;
-          const bar=document.querySelector('.progress-wrap i'); if(bar) bar.style.width=Math.round(d/tot*100)+'%';
-          const lbl=document.querySelector('#ana-label'); if(lbl) lbl.textContent='move '+d+'/'+tot; },
+        const res = await analyzeGame(gm.pgn, {
+      movetime: mt,
+      onProgress:(d,tot)=>{ if(!App.analyzing) return; App.analyzing.done=d; App.analyzing.total=tot;
+        const bar=document.querySelector('.progress-wrap i'); if(bar) bar.style.width=Math.round(d/tot*100)+'%';
+        const lbl=document.querySelector('#ana-count'); if(lbl) lbl.textContent='position '+d+'/'+tot; },
         isCancelled:()=>App.analysisCancelled,
       });
-      Store.state.analyzed[key] = { key, url:gm.url||null, pgn:gm.pgn,
-        date: gm.end_time? new Date(gm.end_time*1000).toISOString().slice(0,10) : new Date().toISOString().slice(0,10),
-        headers:res.headers, plies:res.plies, summary:res.summary, movetime:mt };
+      const normalized = validateState({settings:Store.state.settings, analyzed:{[key]:{ key, url:rawKey||null, pgn:gm.pgn,
+                date, headers:res.headers, plies:res.plies, summary:res.summary, movetime:mt }}}, {strict:true}).analyzed[key];
+      if(!normalized) throw new Error('Analysis record failed validation');
+      Store.state.analyzed[key] = normalized;
       Store.save();
       App.analyzing=null;
       if(jumpTo){ Review.open(Store.state.analyzed[key]); }
@@ -1508,20 +1788,18 @@ async function runAnalysis(list, {jumpTo=false}={}){
 /* =================== BUILDER / PRACTICE HELPERS =================== */
 function savePlaybook(){
   const B = App.builder; if(!B) return;
-  try{
-    const nameInput = $('#bb-name');
-    Store.state.playbook = { name: (nameInput && nameInput.value.trim()) || B.name || '',
-      moves: B.chess.history().join(' '), updated: Date.now() };
-    Store.save();
-  }catch(e){}
+  const nameInput = $('#bb-name');
+  Store.state.playbook = { name: (nameInput && nameInput.value.trim()) || B.name || '',
+    moves: B.chess.history().join(' '), updated: Date.now() };
+  Store.save();
 }
 function restorePlaybook(){
   const B = App.builder; if(!B) return;
   const pb = Store.state.playbook;
-  if(!pb || !pb.moves) return;
+  if(!pb) return;
   if(B.chess.history().length) return;          // live board wins over the draft
   try{
-    for(const tok of sanitizeMoves(pb.moves)){
+    for(const tok of sanitizeMoves(pb.moves || '')){
       try{ if(!B.chess.move(tok)) break; }catch(e){ break; }
     }
     if(pb.name && !B.name) B.name = pb.name;
@@ -1543,26 +1821,28 @@ function practiceFromChess(){
 
 /* =================== IMPORTER =================== */
 const Importer = {
-  async _get(url){
+  async _get(url, signal){
     const attempts = [
-      ()=>fetch(url, {headers:{'Accept':'application/json'}}),
-      ()=>fetch('https://corsproxy.io/?'+encodeURIComponent(url)),
-      ()=>fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(url)),
+      ()=>fetch(url, {headers:{'Accept':'application/json'}, signal}),
+      ()=>fetch('https://corsproxy.io/?'+encodeURIComponent(url), {signal}),
+      ()=>fetch('https://api.allorigins.win/raw?url='+encodeURIComponent(url), {signal}),
     ];
     let lastErr;
     for(const a of attempts){
       try{ const r = await a(); if(!r.ok) throw new Error('HTTP '+r.status); return await r.json(); }
-      catch(e){ lastErr=e; }
+      catch(e){ lastErr=e; if(e && e.name==='AbortError') throw e; }
     }
     throw lastErr||new Error('network error');
   },
-  month(u,y,m){ return this._get(`https://api.chess.com/pub/player/${encodeURIComponent(u)}/games/${y}/${String(m+1).padStart(2,'0')}`).then(j=>j.games||[]); },
+  month(u,y,m,signal){ return this._get(`https://api.chess.com/pub/player/${encodeURIComponent(u)}/games/${y}/${String(m+1).padStart(2,'0')}`, signal).then(j=>Array.isArray(j.games)?j.games:[]); },
   stats(u){ return this._get(`https://api.chess.com/pub/player/${encodeURIComponent(u)}/stats`).catch(()=>null); },
 };
 
 /* =================== BOOT =================== */
 function boot(){
   Store.load();
+  window.addEventListener('pagehide',()=>Store.flush());
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden') Store.flush(); });
   window.addEventListener('error', function(ev){
     try{
       var b = document.getElementById('err-banner');
@@ -1600,7 +1880,8 @@ const App = {
   view:'play',
   play:null,
   builder:null,       // {chess, name, selected}
-  importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null},
+  importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null, requestId:0},
+  importRequestId:0, importAbort:null, accountRequestId:0,
   analysisCancelled:false,
   onEngineStatus(){
     const chip = document.getElementById('chip-engine');
@@ -1611,7 +1892,14 @@ const App = {
   },
 };
 const Play = {
-  session:null, _thinking:false,
+  session:null, _thinking:false, _generation:0,
+  cancel(){
+    this._generation++;
+    Engine.cancelPlay();
+    this._thinking=false;
+    if(this.session) this.session.cancelled=true;
+    this.session=null;
+  },
   start({color, skill, lineName, lineFen, lineMoves}){
     let chess;
     try{ chess = lineFen? new Chess(lineFen) : new Chess(); }
@@ -1627,50 +1915,72 @@ const Play = {
       if(!mv){ err = 'Move "'+tok+'" is not legal in this position.'; break; }
       lineUci.push(mv.from+mv.to+(mv.promotion||''));
     }
-    if(err){ toast(err,'err'); }
-    this.session = { chess, color, skill, lineName:lineName||null, lineUci, lineErr:err, finished:false, result:null, pgn:null };
+    if(err){ toast(err,'err'); return; }
+    const generation=++this._generation;
+    this.session = { id:uid(), generation, chess, color:color==='b'?'b':'w', skill:Math.max(0,Math.min(20,+skill||0)), lineName:lineName||null, lineUci, lineErr:err, finished:false, cancelled:false, result:null, termination:null, pgn:null, flipped:false };
+    this._thinking=false;
+    this.checkEnd(this.session);
     App.view='play'; render();
-    this.engineTurn();
+    if(!this.session.finished) this.engineTurn();
   },
+  _valid(S){ return !!(S && this.session===S && S.generation===this._generation && !S.cancelled); },
   engineTurn(){
     const S=this.session;
-    if(!S||S.finished) return;
-    if(S.chess.turn()===S.color) return;
+    if(!this._valid(S) || S.finished || S.chess.turn()===S.color) return;
     const ply = S.chess.history().length;
     if(ply < S.lineUci.length){
       const scripted = S.lineUci[ply];
       const legal = S.chess.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===scripted);
       if(legal){
-        setTimeout(()=>{ if(App.view==='play'&&Play.session===S) this._apply(scripted); }, 350);
+        const generation=S.generation;
+        this._thinking=true; updatePlayPanels();
+        setTimeout(()=>{ if(this._valid(S) && S.generation===generation){ this._thinking=false; this._apply(scripted); } }, 350);
         return;
       }
     }
     this._thinking = true; updatePlayPanels();
+    const generation=S.generation;
     Engine.playMove(S.chess.fen(), S.skill).then(uci=>{
-      this._thinking = false;
-      if(App.view!=='play'||Play.session!==S) return;
+      if(!this._valid(S) || S.generation!==generation) return;
+      this._thinking=false;
       if(uci){ this._apply(uci); return; }
-      // engine offline/unavailable: fall back to a simple legal mover so the game still progresses
       const ms = S.chess.moves({verbose:true});
       if(ms.length){
         const caps = ms.filter(m=>m.captured);
         const pick = (caps.length && Math.random()<0.7) ? caps[Math.floor(Math.random()*caps.length)] : ms[Math.floor(Math.random()*ms.length)];
         this._apply(pick.from+pick.to+(pick.promotion||''));
       } else updatePlayPanels();
+    }).catch(()=>{
+      if(!this._valid(S) || S.generation!==generation) return;
+      const ms=S.chess.moves({verbose:true}).filter(m=>m && m.from && m.to);
+      if(ms.length){
+        const captures=ms.filter(m=>S.chess.isAttacked(m.to,m.color));
+        const pool=captures.length?captures:ms;
+        const pick=pool[Math.floor(Math.random()*pool.length)];
+        this._apply(pick.from+pick.to+(pick.promotion||''));
+      } else { this._thinking=false; updatePlayPanels(); }
     });
   },
   _apply(uci){
     const S=this.session;
-    const mv = S.chess.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===uci);
-    if(!mv) return;
-    S.chess.move({from:mv.from,to:mv.to,promotion:mv.promotion});
+    if(!this._valid(S) || S.finished) return;
+    this._thinking=false;
+    let mv = S.chess.moves({verbose:true}).find(m=>m.from+m.to+(m.promotion||'')===uci);
+    if(!mv){
+      const legal=S.chess.moves({verbose:true});
+      const caps=legal.filter(m=>m && m.from && m.to && m.captured);
+      const pool=caps.length && Math.random()<0.7 ? caps : legal;
+      mv=pool[Math.floor(Math.random()*pool.length)];
+    }
+    if(!mv){ this.checkEnd(S); this.renderBoard(); return; }
+    try{ S.chess.move({from:mv.from,to:mv.to,promotion:mv.promotion}); }catch(e){ return; }
     this.checkEnd(S);
     this.renderBoard();
     if(!S.finished) this.engineTurn();
   },
   userPlay(from,to){
     const S=this.session;
-    if(!S||S.finished||this._thinking) return false;
+    if(!this._valid(S) || S.finished || this._thinking) return false;
     if(S.chess.turn()!==S.color) return false;
     const mv = S.chess.moves({verbose:true}).find(m=>m.from===from&&m.to===to);
     if(!mv) return false;
@@ -1680,40 +1990,42 @@ const Play = {
     if(!S.finished) this.engineTurn();
     return true;
   },
+  finishSession(S, result, termination='normal'){
+    if(!S || S.finished) return false;
+    const g=S.chess;
+    S.finished=true; S.result=result; S.termination=termination;
+    const resultMarker = result==='draw' ? '1/2-1/2' : (result==='win' ? (S.color==='w'?'1-0':'0-1') : (S.color==='w'?'0-1':'1-0'));
+    g.header('Event','ChessLab','White', S.color==='w'?'You':'Stockfish ('+S.skill+')',
+      'Black', S.color==='b'?'You':'Stockfish ('+S.skill+')',
+      'Date', new Date().toISOString().slice(0,10).replace(/-/g,'.'),
+      'Termination', termination, 'Result', resultMarker);
+    S.pgn=g.pgn(); savePlayGameLocal(S); this._thinking=false; updatePlayPanels();
+    return true;
+  },
   checkEnd(S){
     const g=S.chess;
-    if(g.in_checkmate()){ S.finished=true; S.result=g.turn()===S.color?'loss':'win'; }
-    else if(g.in_draw()||g.in_stalemate()||g.in_threefold_repetition()||g.insufficient_material()){ S.finished=true; S.result='draw'; }
-    if(S.finished){
-      g.header('Event','ChessLab','White', S.color==='w'?'You':'Stockfish ('+S.skill+')',
-        'Black', S.color==='b'?'You':'Stockfish ('+S.skill+')',
-        'Date', new Date().toISOString().slice(0,10).replace(/-/g,'.'),
-        'Result', g.in_checkmate()? (g.turn()==='w'?'0-1':'1-0') : '1/2-1/2');
-      S.pgn = g.pgn();
-      savePlayGameLocal(S);
-    }
+    if(g.in_checkmate()) this.finishSession(S, g.turn()===S.color?'loss':'win', 'checkmate');
+    else if(g.in_draw()||g.in_stalemate()||g.in_threefold_repetition()||g.insufficient_material()) this.finishSession(S, 'draw', g.in_stalemate()?'stalemate':g.insufficient_material()?'insufficient material':g.in_threefold_repetition()?'threefold repetition':'draw');
   },
   renderBoard(){
     const b=document.getElementById('board');
     if(!b||!this.session) return;
     const hist=this.session.chess.history({verbose:true});
     const last = hist.length? {from:hist[hist.length-1].from,to:hist[hist.length-1].to} : null;
-    Board.render({lastMove:last});
-    updatePlayPanels();
+    Board.render({lastMove:last}); updatePlayPanels();
   },
 };
-function savePlayGameLocal(S){ /* keep latest practice games for quick re-review via Review */ }
-
-function buildNav(){
-  document.getElementById('tabs').innerHTML = VIEWS.map(v=>
-    `<button data-view="${v.id}" ${App.view===v.id?'aria-current="page"':''}>${v.label}</button>`).join('');
-  document.querySelectorAll('#tabs button').forEach(b=>{
-    if(!b._bound){ b._bound=true; b.addEventListener('click',()=>go(b.dataset.view)); }
-  });
+function savePlayGameLocal(S){
+  if(!S || !S.pgn) return;
+  const list=Array.isArray(Store.state.practiceGames)?Store.state.practiceGames:[];
+  const rec={id:S.id || uid(), date:new Date().toISOString(), pgn:S.pgn, result:S.result || ''};
+  Store.state.practiceGames=[rec, ...list.filter(x=>x.id!==rec.id)].slice(0,50);
+  Store.save();
 }
+
 function go(view){
+  if(!VIEWS.some(v=>v.id===view)) view='play';
   App.view = view;
-  // update the tab indicator immediately
   document.querySelectorAll('#tabs button').forEach(b=>{
     if(b.dataset.view===view) b.setAttribute('aria-current','page');
     else b.removeAttribute('aria-current');
@@ -1755,7 +2067,7 @@ function renderPlay(){
   }
   return '<div class="game-grid"><div class="board-col">'+
     '<div class="players-strip"><span class="avatar">&#9822;</span><span>'+(S.color==='w'?'Stockfish (skill '+S.skill+')':'You')+'</span>'+
-    '<span class="faint small" id="play-status"></span></div>'+
+    '<span class="faint small" id="play-status" role="status" aria-live="polite"></span></div>'+
     '<div id="board"></div>'+
     '<div class="players-strip"><span class="avatar">&#9822;</span><span>'+(S.color==='w'?'You':'Stockfish (skill '+S.skill+')')+'</span></div>'+
     (S.lineErr?'<div class="banner warn">'+esc(S.lineErr)+'</div>':'')+
@@ -1767,7 +2079,7 @@ function renderPlay(){
     '<button class="btn btn-green btn-sm" data-act="review-play">Review this game</button>'+
     '<button class="btn btn-ghost btn-sm" data-act="new-game">New game</button></div></div>'+
     '<div style="display:flex;gap:8px">'+
-    '<button class="btn btn-ghost btn-sm" data-act="flip-board">Flip</button>'+
+    '<button class="btn btn-ghost btn-sm" data-act="flip-board" aria-label="Flip board" aria-pressed="'+(S.flipped?'true':'false')+'">Flip</button>'+
     '<button class="btn btn-danger btn-sm" data-act="end-play">Resign</button></div>'+
     '</div></div>';
 }
@@ -1810,8 +2122,8 @@ function renderOpenings(){
   const linesHTML = myLines.length
     ? '<div class="card mt-14"><div class="card-pad" style="padding-bottom:6px"><b class="small">My lines ('+myLines.length+')</b></div>'+
       myLines.map(l=>'<div class="gm-row"><span style="flex:1"><b>'+esc(l.name)+'</b><br><span class="small faint">'+esc((l.moves||'').slice(0,70))+'</span></span>'+
-      '<button class="btn btn-green btn-sm" data-act="practice-line" data-id="'+l.id+'">Practice</button>'+
-      '<button class="icon-btn" data-act="del-line" data-id="'+l.id+'" aria-label="Delete">&#128465;</button></div>').join('')+'</div>'
+      '<button class="btn btn-green btn-sm" data-act="practice-line" data-id="'+esc(l.id)+'">Practice</button>'+
+      '<button class="icon-btn" data-act="del-line" data-id="'+esc(l.id)+'" aria-label="Delete">&#128465;</button></div>').join('')+'</div>'
     : '<div class="card card-pad small muted mt-14">No saved lines yet. Play moves on the board, name the line, and Save.</div>';
   return '<h1>Openings Workshop</h1>'+
     '<p class="muted mt-8">Play the moves you want to practice (for both sides), save the line, then practice it: the engine answers along your line and takes over where it ends.</p>'+
