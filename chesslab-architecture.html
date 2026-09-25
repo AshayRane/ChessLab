@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChessLab Architecture Map</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #020617;
+    --panel: #0b1220;
+    --panel-2: #0f172a;
+    --line: #1e293b;
+    --line-soft: #172033;
+    --text: #f8fafc;
+    --muted: #94a3b8;
+    --faint: #64748b;
+    --cyan: #22d3ee;
+    --green: #34d399;
+    --violet: #a78bfa;
+    --amber: #fbbf24;
+    --rose: #fb7185;
+    --orange: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.55 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background-image: linear-gradient(rgba(30,41,59,.16) 1px, transparent 1px), linear-gradient(90deg, rgba(30,41,59,.16) 1px, transparent 1px);
+    background-size: 40px 40px;
+    mask-image: linear-gradient(to bottom, rgba(0,0,0,.55), transparent 72%);
+  }
+  .wrap { position: relative; max-width: 1500px; margin: 0 auto; padding: 30px 24px 46px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
+  .eyebrow { display: flex; align-items: center; gap: 9px; color: var(--cyan); font: 700 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .12em; text-transform: uppercase; }
+  .pulse { width: 10px; height: 10px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 0 5px rgba(34,211,238,.12); animation: pulse 2.2s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+  h1 { margin: 10px 0 6px; font-size: clamp(26px, 4vw, 42px); line-height: 1.08; letter-spacing: -.035em; }
+  .subtitle { max-width: 780px; margin: 0; color: var(--muted); font-size: 16px; }
+  .badge { flex: 0 0 auto; border: 1px solid rgba(34,211,238,.35); border-radius: 999px; padding: 8px 12px; color: var(--cyan); background: rgba(8,51,68,.35); font: 600 12px/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin: 0 0 14px; }
+  .tabs { display: flex; gap: 6px; padding: 5px; border: 1px solid var(--line); border-radius: 12px; background: rgba(15,23,42,.72); }
+  .tab { border: 1px solid transparent; border-radius: 8px; padding: 9px 14px; background: transparent; color: var(--muted); cursor: pointer; font: 600 13px/1.1 inherit; }
+  .tab:hover { color: var(--text); background: rgba(30,41,59,.55); }
+  .tab[aria-selected="true"] { color: var(--text); background: rgba(8,51,68,.9); border-color: rgba(34,211,238,.45); box-shadow: inset 0 0 0 1px rgba(34,211,238,.08); }
+  .download { border: 1px solid var(--line); border-radius: 9px; padding: 10px 13px; color: var(--text); background: rgba(15,23,42,.8); cursor: pointer; font: 600 13px/1 inherit; }
+  .download:hover { border-color: var(--cyan); }
+  .canvas-card { overflow: auto; border: 1px solid var(--line); border-radius: 16px; background: rgba(2,6,23,.78); box-shadow: 0 22px 70px rgba(0,0,0,.28); }
+  canvas { display: block; width: 100%; min-width: 900px; height: auto; aspect-ratio: 1600 / 980; }
+  .canvas-note { padding: 10px 14px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 12px; }
+  .below { display: grid; grid-template-columns: 1.25fr .75fr; gap: 16px; margin-top: 16px; }
+  .card { border: 1px solid var(--line); border-radius: 13px; background: rgba(15,23,42,.68); padding: 17px 18px; }
+  .card h2 { margin: 0 0 9px; font-size: 16px; letter-spacing: -.01em; }
+  .card h3 { margin: 0 0 5px; font-size: 14px; }
+  .card p { margin: 0 0 9px; color: var(--muted); }
+  .card ul { margin: 0; padding-left: 19px; color: var(--muted); }
+  .card li { margin: 6px 0; }
+  .card li strong { color: var(--text); }
+  .readout { min-height: 176px; }
+  .readout .label { color: var(--cyan); font: 700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .09em; text-transform: uppercase; }
+  .readout h2 { margin-top: 8px; }
+  .facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 16px; }
+  .fact { border-left: 2px solid var(--line); padding-left: 11px; }
+  .fact b { display: block; font-size: 13px; }
+  .fact span { color: var(--faint); font-size: 12px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 9px 18px; margin-top: 16px; color: var(--muted); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; display: inline-block; }
+  .swatch.cyan { background: var(--cyan); } .swatch.green { background: var(--green); }
+  .swatch.violet { background: var(--violet); } .swatch.amber { background: var(--amber); }
+  .swatch.rose { background: var(--rose); } .swatch.orange { background: var(--orange); }
+  footer { margin-top: 22px; color: var(--faint); text-align: center; font: 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+  @media (max-width: 850px) {
+    .wrap { padding: 22px 12px 32px; }
+    header { display: block; }
+    .badge { display: inline-block; margin-top: 14px; }
+    .below { grid-template-columns: 1fr; }
+    .facts { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow"><span class="pulse"></span>ChessLab / architecture map</div>
+      <h1>How ChessLab fits together</h1>
+      <p class="subtitle">A beginner-friendly map of the real app. Start with the simple view, then switch on Intermediate and Advanced when you want the implementation details.</p>
+    </div>
+    <div class="badge">v2.6.1 · local-first</div>
+  </header>
+
+  <div class="toolbar">
+    <div class="tabs" role="tablist" aria-label="Diagram detail level">
+      <button class="tab" role="tab" data-level="beginner" aria-selected="true">Beginner</button>
+      <button class="tab" role="tab" data-level="intermediate" aria-selected="false">Intermediate</button>
+      <button class="tab" role="tab" data-level="advanced" aria-selected="false">Advanced</button>
+    </div>
+    <button class="download" id="download" type="button">Download PNG</button>
+  </div>
+
+  <section class="canvas-card" aria-label="ChessLab architecture diagram">
+    <canvas id="diagram" width="1600" height="980" role="img" aria-label="ChessLab architecture diagram. Use the detail tabs to change the level of detail.">
+      Your browser does not support canvas. The text cards below still explain the architecture.
+    </canvas>
+    <div class="canvas-note">Tip: hover or click a box for a plain-English explanation. The arrows show the direction of information, not a network diagram.</div>
+  </section>
+
+  <div class="legend" aria-label="Diagram legend">
+    <span><i class="swatch cyan"></i> Browser / UI</span>
+    <span><i class="swatch green"></i> Rules and app logic</span>
+    <span><i class="swatch violet"></i> Saved data</span>
+    <span><i class="swatch amber"></i> Engine or external service</span>
+    <span><i class="swatch rose"></i> Safety / validation</span>
+    <span><i class="swatch orange"></i> Optional network import</span>
+  </div>
+
+  <section class="below">
+    <article class="card">
+      <h2>Plain-English guide</h2>
+      <div id="guide">
+        <p><strong>ChessLab is one local web app.</strong> It opens in your browser, keeps your settings and saved games in that browser, and uses Stockfish for suggestions when the engine is available.</p>
+        <ul>
+          <li><strong>Play</strong> is a live game against the engine.</li>
+          <li><strong>Openings</strong> lets you build a line and practise from its last move.</li>
+          <li><strong>Review</strong> walks through an analysed game one move at a time.</li>
+          <li><strong>Progress</strong> summarises saved results.</li>
+          <li><strong>Settings</strong> controls the account label, theme, engine strength, and data.</li>
+        </ul>
+      </div>
+    </article>
+    <article class="card readout" aria-live="polite">
+      <div class="label" id="readout-label">Selected box</div>
+      <h2 id="readout-title">Start here</h2>
+      <p id="readout-text">Move across the diagram or click a box to learn what it does. The Beginner view is intentionally the simplest map.</p>
+    </article>
+  </section>
+
+  <section class="card" style="margin-top:16px">
+    <h2>Three useful distinctions</h2>
+    <div class="facts">
+      <div class="fact"><b>Player side</b><span>Which color you own in a session. This is gameplay state, not a visual setting.</span></div>
+      <div class="fact"><b>Turn</b><span>Which color the chess rules say may move right now.</span></div>
+      <div class="fact"><b>Board direction</b><span>Which way the board is drawn. Flipping it does not change who owns the pieces.</span></div>
+    </div>
+  </section>
+
+  <footer>ChessLab architecture map · generated from the shipped index.html runtime · no build step required</footer>
+</main>
+<script>
+(() => {
+  'use strict';
+  const canvas = document.getElementById('diagram');
+  const ctx = canvas.getContext('2d');
+  const W = 1600, H = 980;
+  const DPR_MAX = 2;
+  const C = {
+    bg: '#020617', panel: '#0b1220', panel2: '#0f172a', line: '#1e293b', soft: '#172033',
+    text: '#f8fafc', muted: '#94a3b8', faint: '#64748b', cyan: '#22d3ee', green: '#34d399',
+    violet: '#a78bfa', amber: '#fbbf24', rose: '#fb7185', orange: '#fb923c'
+  };
+  const type = { ui: C.cyan, logic: C.green, data: C.violet, external: C.amber, safety: C.rose, network: C.orange };
+  let level = 'beginner';
+  let hot = null;
+  let hits = [];
+
+  function rgba(hex, a) {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  function rr(x, y, w, h, r = 12) {
+    const rad = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + rad, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rad);
+    ctx.arcTo(x + w, y + h, x, y + h, rad);
+    ctx.arcTo(x, y + h, x, y, rad);
+    ctx.arcTo(x, y, x + w, y, rad);
+    ctx.closePath();
+  }
+  function fillRound(x, y, w, h, fill, stroke, r = 12, width = 1.5) {
+    rr(x, y, w, h, r);
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.stroke(); }
+  }
+  function text(str, x, y, size = 16, color = C.text, weight = 500, align = 'left') {
+    ctx.fillStyle = color;
+    ctx.font = `${weight} ${size}px Inter, ui-sans-serif, system-ui, sans-serif`;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(str, x, y);
+  }
+  function mono(str, x, y, size = 12, color = C.muted, weight = 500, align = 'left') {
+    ctx.fillStyle = color;
+    ctx.font = `${weight} ${size}px ui-monospace, SFMono-Regular, Consolas, monospace`;
+    ctx.textAlign = align;
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(str, x, y);
+  }
+  function wrap(str, maxWidth, size = 14, weight = 500) {
+    ctx.font = `${weight} ${size}px Inter, ui-sans-serif, system-ui, sans-serif`;
+    const words = String(str).split(/\s+/);
+    const lines = [];
+    let line = '';
+    for (const word of words) {
+      const next = line ? `${line} ${word}` : word;
+      if (ctx.measureText(next).width > maxWidth && line) { lines.push(line); line = word; }
+      else line = next;
+    }
+    if (line) lines.push(line);
+    return lines;
+  }
+  function arrow(x1, y1, x2, y2, color = C.muted, label = '', dashed = false, width = 2) {
+    ctx.save();
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = width;
+    ctx.setLineDash(dashed ? [8, 7] : []);
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.setLineDash([]);
+    const a = Math.atan2(y2 - y1, x2 - x1);
+    const s = 9;
+    ctx.beginPath();
+    ctx.moveTo(x2, y2);
+    ctx.lineTo(x2 - s * Math.cos(a - .45), y2 - s * Math.sin(a - .45));
+    ctx.lineTo(x2 - s * Math.cos(a + .45), y2 - s * Math.sin(a + .45));
+    ctx.closePath(); ctx.fill();
+    if (label) {
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+      ctx.font = '600 12px ui-monospace, SFMono-Regular, Consolas, monospace';
+      const w = ctx.measureText(label).width + 12;
+      fillRound(mx - w / 2, my - 24, w, 21, C.bg, C.soft, 6, 1);
+      mono(label, mx, my - 9, 12, color, 600, 'center');
+    }
+    ctx.restore();
+  }
+  function pathArrow(points, color = C.muted, label = '', dashed = false) {
+    ctx.save();
+    ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2; ctx.setLineDash(dashed ? [8, 7] : []);
+    ctx.beginPath(); ctx.moveTo(points[0][0], points[0][1]);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+    ctx.stroke(); ctx.setLineDash([]);
+    const a = points[points.length - 2], b = points[points.length - 1];
+    const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), s = 9;
+    ctx.beginPath(); ctx.moveTo(b[0], b[1]);
+    ctx.lineTo(b[0] - s * Math.cos(ang - .45), b[1] - s * Math.sin(ang - .45));
+    ctx.lineTo(b[0] - s * Math.cos(ang + .45), b[1] - s * Math.sin(ang + .45));
+    ctx.closePath(); ctx.fill();
+    if (label) mono(label, points[Math.floor(points.length / 2)][0] + 8, points[Math.floor(points.length / 2)][1] - 10, 12, color, 600);
+    ctx.restore();
+  }
+  function box(x, y, w, h, kind, title, subtitle = '', extra = '', options = {}) {
+    const color = type[kind] || C.cyan;
+    const active = hot && hot.x === x && hot.y === y;
+    fillRound(x, y, w, h, C.panel, color, options.r || 13, active ? 2.5 : 1.5);
+    ctx.save();
+    ctx.fillStyle = rgba(color, .08); rr(x + 1, y + 1, w - 2, h - 2, (options.r || 13) - 1); ctx.fill();
+    ctx.restore();
+    const tx = x + 16, ty = y + 27;
+    text(title, tx, ty, options.titleSize || 17, C.text, 700);
+    if (subtitle) {
+      const lines = wrap(subtitle, w - 32, 12.5, 500);
+      let yy = ty + 21;
+      for (const line of lines.slice(0, 3)) { text(line, tx, yy, 12.5, C.muted, 500); yy += 17; }
+    }
+    if (extra) {
+      let yy = y + h - 16;
+      const lines = wrap(extra, w - 32, 11.5, 600);
+      for (const line of lines.slice(-2)) { mono(line, tx, yy, 11.5, color, 600); yy -= 15; }
+    }
+    hits.push({ x, y, w, h, kind, title, subtitle, extra });
+  }
+  function pill(x, y, w, label, color) {
+    fillRound(x, y, w, 25, rgba(color, .12), rgba(color, .55), 8, 1);
+    mono(label, x + w / 2, y + 17, 11, color, 700, 'center');
+  }
+  function section(x, y, w, h, label, color = C.faint) {
+    rr(x, y, w, h, 16);
+    ctx.fillStyle = rgba(C.panel2, .55); ctx.fill();
+    ctx.strokeStyle = rgba(C.line, .9); ctx.lineWidth = 1.5; ctx.setLineDash([7, 6]); ctx.stroke(); ctx.setLineDash([]);
+    mono(label.toUpperCase(), x + 16, y + 23, 11, color, 700);
+  }
+  function grid() {
+    ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = rgba(C.line, .38); ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y <= H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    const glow = ctx.createRadialGradient(W / 2, 90, 20, W / 2, 90, 720);
+    glow.addColorStop(0, rgba(C.cyan, .07)); glow.addColorStop(1, rgba(C.cyan, 0));
+    ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+  }
+  function heading(title, subtitle) {
+    text(title, 48, 55, 25, C.text, 800);
+    mono(subtitle, 50, 79, 12, C.muted, 500);
+  }
+  function note(x, y, w, label, color = C.faint) {
+    mono(label, x, y, 11, color, 500);
+  }
+  function drawBeginner() {
+    hits = [];
+    heading('The simple picture', 'Four big ideas: you → screens → ChessLab brain → engine and saved data');
+    section(40, 108, 1520, 285, 'What happens when you use the app');
+    box(75, 172, 235, 105, 'ui', 'You', 'Click, tap, or use the keyboard.', 'browser input', { titleSize: 19 });
+    box(425, 148, 350, 150, 'ui', 'Screens you use', 'Play · Openings · Review · Progress · Settings', 'the visible parts', { titleSize: 19 });
+    box(910, 148, 300, 150, 'logic', 'ChessLab brain', 'Rules, board, turn checking, saved-game logic.', 'the app decides what is legal', { titleSize: 18 });
+    box(1320, 148, 205, 150, 'data', 'Your data', 'Settings, opening lines, analysed games.', 'localStorage: chesslab.v1', { titleSize: 17 });
+    arrow(310, 224, 415, 224, C.cyan, 'your move');
+    arrow(775, 224, 900, 224, C.green, 'request');
+    arrow(1210, 224, 1310, 224, C.violet, 'save / load');
+    box(910, 430, 300, 122, 'external', 'Stockfish', 'The chess engine suggests a reply.', 'optional network download', { titleSize: 18 });
+    box(1320, 430, 205, 122, 'data', 'Saved locally', 'Your browser keeps the data.', 'no account database', { titleSize: 16 });
+    arrow(1060, 298, 1060, 420, C.amber, 'asks for best move');
+    arrow(1210, 490, 1310, 490, C.violet, 'stores records');
+    section(40, 625, 1520, 250, 'A tiny Play example');
+    const steps = [
+      [80, '1', 'You click a square', C.cyan, 'Board'],
+      [370, '2', 'App checks the turn', C.green, 'Rules'],
+      [660, '3', 'Board updates', C.cyan, 'UI'],
+      [950, '4', 'Engine thinks', C.amber, 'Stockfish'],
+      [1240, '5', 'Reply is checked', C.rose, 'Safety']
+    ];
+    for (const [x, n, label, color, sub] of steps) {
+      box(x, 700, 225, 92, n === '4' ? 'external' : n === '5' ? 'safety' : n === '2' ? 'logic' : 'ui', `${n}. ${label}`, sub, '', { titleSize: 15, r: 11 });
+    }
+    for (let i = 0; i < steps.length - 1; i++) arrow(steps[i][0] + 225, 746, steps[i + 1][0] - 10, 746, C.muted, '', false, 1.6);
+    note(48, 925, 600, 'Practice works without a server. Network is needed for optional game import and for downloading Stockfish.', C.faint);
+    note(48, 947, 900, 'The diagram shows direction of information. It is not a claim that your computer runs a server.', C.faint);
+  }
+  function drawIntermediate() {
+    hits = [];
+    heading('The intermediate picture', 'The real runtime is one index.html with focused responsibilities inside it');
+    const x = 40, w = 1520;
+    const layers = [
+      [120, 150, '1 · Browser shell and views', C.cyan, 'index.html CSS/HTML · renderPlay · renderOpenings · renderReview · renderProgress · renderSettings'],
+      [268, 150, '2 · Interaction and rendering', C.cyan, 'Board.init / render / _onSquare · bindView · handleAction · click, drag, and keyboard input'],
+      [416, 150, '3 · Domain state and rules', C.green, 'App · Play.session · Review · Store · chess.js legal move generation and turn rules'],
+      [564, 150, '4 · Engine and analysis', C.amber, 'Engine worker queue · UCI parsing · analyzeGame · classifyPly · runAnalysis'],
+      [712, 150, '5 · Persistence and boundaries', C.violet, 'localStorage · PGN/FEN · JSON import/export · optional chess.com Importer']
+    ];
+    for (const [y, hh, label, color, sub] of layers) {
+      section(x, y, w, hh, label, color);
+      pill(x + 24, y + 42, 176, label.split(' · ')[0], color);
+      text(sub, x + 225, y + 62, 15, C.muted, 500);
+      const words = wrap(sub, 1190, 15, 500);
+      if (words.length > 1) { words.slice(1).forEach((line, i) => text(line, x + 225, y + 84 + i * 20, 15, C.muted, 500)); }
+    }
+    box(90, 200, 300, 108, 'ui', 'View layer', 'HTML strings become the current screen.', 'render() replaces #main', { titleSize: 16, r: 10 });
+    box(450, 348, 300, 108, 'logic', 'State layer', 'App, Play, Review hold live game state.', 'chess.turn() is authoritative', { titleSize: 16, r: 10 });
+    box(810, 496, 300, 108, 'external', 'Engine adapter', 'A serial queue sends FEN + movetime.', 'bestmove is checked before use', { titleSize: 16, r: 10 });
+    box(1170, 644, 300, 108, 'data', 'Storage', 'Versioned JSON is normalised and saved.', 'strict import rejects bad data', { titleSize: 16, r: 10 });
+    arrow(390, 254, 445, 390, C.cyan, 'click / data-act');
+    arrow(750, 402, 805, 540, C.green, 'FEN + rules');
+    arrow(1110, 550, 1165, 690, C.amber, 'analysis result');
+    section(40, 830, 1520, 95, 'Important separation');
+    box(80, 855, 430, 50, 'logic', 'playerColor', 'Who owns the session.', '', { titleSize: 14, r: 9 });
+    box(585, 855, 430, 50, 'ui', 'Board.color', 'Which way squares are drawn.', '', { titleSize: 14, r: 9 });
+    box(1090, 855, 430, 50, 'safety', 'chess.turn()', 'Who may legally move now.', '', { titleSize: 14, r: 9 });
+    note(48, 950, 1300, 'src/*.js are boundary notes today. The shipped browser runtime is still the tested inline code in index.html.', C.amber);
+  }
+  function drawAdvanced() {
+    hits = [];
+    heading('The advanced picture', 'The important paths, data contracts, and safety rails inside the single-file runtime');
+    section(40, 110, 980, 700, 'Live game path');
+    const live = [
+      [80, 175, 190, 78, 'ui', 'User input', 'click / drag / key', 'Board'],
+      [320, 175, 190, 78, 'ui', 'handleAction', 'data-act routing', 'bindView'],
+      [560, 175, 190, 78, 'logic', 'Play.session', 'chess + color', 'userPlay'],
+      [800, 175, 180, 78, 'safety', 'Turn guard', 'turn === color', 'authorise'],
+      [80, 330, 190, 78, 'ui', 'Board.render', 'diff pieces + overlays', 'visual only'],
+      [320, 330, 190, 78, 'logic', 'checkEnd', 'mate / draw rules', 'finishSession'],
+      [560, 330, 190, 78, 'external', 'Engine.playMove', 'FEN → UCI reply', 'serial queue'],
+      [800, 330, 180, 78, 'safety', '_apply', 'legal move check', 'fallback safe'],
+    ];
+    for (const [x, y, w, h, kind, t, s, e] of live) box(x, y, w, h, kind, t, s, e, { titleSize: 14, r: 10 });
+    arrow(270, 214, 310, 214, C.cyan, 'intent');
+    arrow(510, 214, 550, 214, C.green, 'route');
+    arrow(750, 214, 790, 214, C.rose, 'allowed?');
+    arrow(890, 253, 890, 320, C.rose, 'reply');
+    arrow(800, 369, 760, 369, C.amber, 'bestmove');
+    arrow(560, 369, 520, 369, C.green, 'apply');
+    arrow(320, 369, 280, 369, C.cyan, 'redraw');
+    arrow(175, 408, 175, 255, C.cyan, 'show', true, 1.4);
+    box(80, 500, 900, 235, 'logic', 'Session contract', '', '', { titleSize: 17, r: 12 });
+    mono('Play.session = { chess, color: playerColor, engineColor, flipped, generation, finished, pgn }', 105, 555, 15, C.green, 600);
+    mono('Openings: last line mover → playerColor; opposite color → engineColor', 105, 585, 14, C.cyan, 600);
+    mono('Flip changes Board.color only; it never changes playerColor.', 105, 615, 14, C.muted, 500);
+    mono('Every delayed callback checks generation/session identity before mutating state.', 105, 645, 14, C.rose, 500);
+    mono('Engine worker: uci → uciok → isready → readyok → position → go movetime → bestmove', 105, 675, 13, C.amber, 500);
+    section(1050, 110, 510, 700, 'Review and data path');
+    box(1090, 175, 430, 78, 'network', 'Importer', 'chess.com API + CORS fallbacks', 'optional', { titleSize: 16, r: 10 });
+    box(1090, 330, 430, 78, 'external', 'runAnalysis', 'runId guards stale progress', 'async', { titleSize: 16, r: 10 });
+    box(1090, 485, 430, 78, 'logic', 'analyzeGame', 'PGN/FEN replay + engine per ply', 'analysis', { titleSize: 16, r: 10 });
+    box(1090, 640, 430, 78, 'safety', 'validateState', 'replays chain, then stores', 'strict', { titleSize: 16, r: 10 });
+    arrow(1305, 253, 1305, 320, C.orange, 'game list');
+    arrow(1305, 408, 1305, 475, C.amber, 'positions');
+    arrow(1305, 563, 1305, 630, C.rose, 'normalise');
+    box(1090, 830, 430, 118, 'data', 'Store.state', 'settings · openingLines · analyzed\nplaybook · practiceGames', 'localStorage chesslab.v1', { titleSize: 16, r: 11 });
+    section(40, 840, 980, 118, 'Safety rails');
+    box(80, 862, 200, 66, 'safety', 'esc()', 'escape dynamic HTML', 'XSS boundary', { titleSize: 14, r: 9 });
+    box(310, 862, 200, 66, 'safety', 'SAFE_UCI', 'validate move strings', 'shape check', { titleSize: 14, r: 9 });
+    box(540, 862, 200, 66, 'safety', 'safe keys', 'block prototype keys', 'ECO safe', { titleSize: 14, r: 9 });
+    box(770, 862, 210, 66, 'safety', 'AbortController', 'cancel stale imports', 'requestId', { titleSize: 14, r: 9 });
+    note(48, 990, 1500, 'Reality check: the src/*.js files describe intended module seams. The working release still runs from the inline implementation in index.html.', C.amber);
+  }
+  function resize() {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, DPR_MAX);
+    canvas.width = Math.max(1, Math.round(rect.width * dpr));
+    canvas.height = Math.max(1, Math.round(rect.height * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw();
+  }
+  function draw() {
+    ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+    grid();
+    if (level === 'beginner') drawBeginner();
+    else if (level === 'intermediate') drawIntermediate();
+    else drawAdvanced();
+  }
+  function setLevel(next) {
+    level = next;
+    document.querySelectorAll('.tab').forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.level === level)));
+    draw();
+  }
+  function hitAt(x, y) {
+    return [...hits].reverse().find(h => x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h);
+  }
+  function showInfo(h) {
+    if (!h) return;
+    document.getElementById('readout-label').textContent = h.kind;
+    document.getElementById('readout-title').textContent = h.title;
+    document.getElementById('readout-text').textContent = [h.subtitle, h.extra].filter(Boolean).join(' · ');
+  }
+  document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => setLevel(tab.dataset.level)));
+  canvas.addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    const x = (e.clientX - r.left) * W / r.width, y = (e.clientY - r.top) * H / r.height;
+    const found = hitAt(x, y);
+    if (found !== hot) { hot = found; draw(); }
+    canvas.style.cursor = found ? 'pointer' : 'default';
+    if (found) showInfo(found);
+  });
+  canvas.addEventListener('mouseleave', () => { hot = null; draw(); });
+  canvas.addEventListener('click', e => {
+    const r = canvas.getBoundingClientRect();
+    const found = hitAt((e.clientX - r.left) * W / r.width, (e.clientY - r.top) * H / r.height);
+    if (found) showInfo(found);
+  });
+  document.getElementById('download').addEventListener('click', () => {
+    const link = document.createElement('a');
+    link.download = `chesslab-architecture-${level}.png`;
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+  });
+  window.addEventListener('resize', resize);
+  resize();
+})();
+</script>
+</body>
+</html>
