@@ -1294,7 +1294,7 @@ const Review = {
   },
   flip(){ this.flipped=!this.flipped; this.data && render(); },
   async playAlternative(from,to){
-    if(!this.data || this.nav>=this.hist.length || App.analyzing) return false;
+    if(!this.data || this.nav<0 || this.nav>this.hist.length || App.analyzing) return false;
     const requestId=(this._altRequestId||0)+1; this._altRequestId=requestId;
     const basePly=this.nav;
     const baseData=this.data;
@@ -2025,6 +2025,7 @@ function recordBuilderMove(B, san){
   // Replaying an existing continuation must not erase its stored suffix;
   // a newly-created divergent branch must be committed with the new move.
   if(diverged || !expected) syncBuilderBranch(B);
+  commitBuilderBoard(B);
   B._restored=true; return true;
 }
 function builderDiverges(B, move){
@@ -2033,10 +2034,21 @@ function builderDiverges(B, move){
   const expected=tokens[B.chess.history().length];
   return !!expected && expected!==move.san;
 }
+function commitBuilderBoard(B){
+  ensureBuilderModel(B);
+  const branch=activeBuilderBranch(B);
+  if(!branch) return null;
+  const live=B.chess.history();
+  const stored=sanitizeMoves(branch.moves||'');
+  const isPrefixOfStored=stored.length>=live.length && stored.slice(0,live.length).every((tok,i)=>tok===live[i]);
+  if(isPrefixOfStored) branch.moves=live.join(' ');
+  return branch;
+}
 function savePlaybook(){
   const B = ensureBuilderModel(App.builder); if(!B) return;
   // Persist the committed branch lines. The live board may be a prefix while
   // the user is seeking; seeking must not truncate the stored line.
+  commitBuilderBoard(B);
   const branch = activeBuilderBranch(B);
   if(!branch) return;
   const nameInput = $('#bb-name');
