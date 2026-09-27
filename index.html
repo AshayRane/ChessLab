@@ -219,7 +219,7 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.0</span>
+<span class="ver-badge" title="ChessLab version">v2.7.2</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -1289,7 +1289,8 @@ const Review = {
   },
   setPly(ply){
     this._altRequestId=(this._altRequestId||0)+1;
-    this.nav=Math.max(0,Math.min(ply,this.hist.length));
+    const maxPly=this.branch ? Math.max(this.hist.length, this.branch.basePly+this.branch.moves.length) : this.hist.length;
+    this.nav=Math.max(0,Math.min(ply,maxPly));
     if(this.branch && (this.nav<this.branch.basePly || this.nav>this.branch.basePly+this.branch.moves.length)) this.branch=null;
     render();
   },
@@ -1308,8 +1309,8 @@ const Review = {
     try{ result=await Engine.analyse(next.fen(), Store.state.settings.reviewMovetime, 2); }catch(e){}
     if(requestId!==this._altRequestId || this.data!==baseData || this.nav!==basePly) return false;
     if(!result) return false;
-    const currentPly=this.plys[this.nav] || null;
-    const before=currentPly && currentPly.evalBefore;
+    const currentPly=this.plys[this.nav] || (this.nav===this.hist.length ? this.plys[this.nav-1] : null);
+    const before=currentPly && (this.nav===this.hist.length ? currentPly.evalAfter : currentPly.evalBefore);
     const after=result;
     const mover=g.turn();
     const wpForMover=ev=>{ if(!ev || !isEval(ev)) return null; const wpWhite=wpWhiteOf(ev); return mover==='w' ? wpWhite : 100-wpWhite; };
@@ -1330,8 +1331,9 @@ const Review = {
     const san=nextHistory[nextHistory.length-1];
     if(!san) return false;
     const mover=g.turn();
-    const wpForMover=ev=>{ if(!ev || !isEval(ev)) return null; const wpWhite=wpWhiteOf(ev); return mover==='w' ? wpWhite : 100-wpWhite; };
-    this.branch={kind:'best',basePly:this.nav,fen:g.fen(),moves:[ply.bestUci],move:{san,uci:ply.bestUci,mover,moveNum:Math.floor(this.nav/2)+1},evalBefore:ply.evalBefore||null,evalAfter:ply.evalAfter||null,wpBefore:wpForMover(ply.evalBefore),wpAfter:wpForMover(ply.evalAfter)};
+    // The stored evalAfter belongs to the played move, not to the engine's
+    // recommendation; do not present it as the best continuation's result.
+    this.branch={kind:'best',basePly:this.nav,fen:g.fen(),moves:[ply.bestUci],move:{san,uci:ply.bestUci,mover,moveNum:Math.floor(this.nav/2)+1},evalBefore:null,evalAfter:null,wpBefore:null,wpAfter:null};
     this.nav=this.nav+1; render(); return true;
   },
 };
@@ -1412,23 +1414,27 @@ function myColorOfHeaders(h){
 }
 function renderReviewReport(){
   const R = Review;
-  const ply = Math.min(R.nav, R.hist.length);
+  const branchEnd = R.branch ? R.branch.basePly + R.branch.moves.length : -1;
+  const ply = R.branch && R.nav>=R.branch.basePly && R.nav<=branchEnd ? R.nav : Math.min(R.nav, R.hist.length);
   const {g, last} = Review.boardAt(ply);
-  const branchMove = R.branch && ply===R.branch.basePly+1 ? R.branch.move : null;
-  const curPly = branchMove || (ply>0 ? R.plys[ply-1] : null);
-  const nextPly = branchMove ? null : (ply<R.plys.length ? R.plys[ply] : null);
-  const ev = nextPly ? nextPly.evalBefore : (curPly && curPly.evalAfter) || (R.plys[R.plys.length-1] ? R.plys[R.plys.length-1].evalAfter : null);
+  const branchMove = R.branch && ply===R.branch.basePly+1
+    ? {...R.branch.move, evalBefore:R.branch.evalBefore, evalAfter:R.branch.evalAfter, wpBefore:R.branch.wpBefore, wpAfter:R.branch.wpAfter}
+    : null;
+  const branchActive = !!(R.branch && ply>R.branch.basePly && ply<=branchEnd);
+  const curPly = branchActive ? branchMove : (ply>0 ? R.plys[ply-1] : null);
+  const nextPly = branchActive ? null : (ply<R.plys.length ? R.plys[ply] : null);
+  const ev = branchActive ? (branchMove && branchMove.evalAfter || null) : (nextPly ? nextPly.evalBefore : (curPly && curPly.evalAfter) || (R.plys[R.plys.length-1] ? R.plys[R.plys.length-1].evalAfter : null));
   const wp = ev && isEval(ev) ? wpWhiteOf({bestCpWhite:ev.bestCpWhite, bestMateWhite:ev.bestMateWhite}) : 50;
   const showEval = Store.state.settings.showEvalInReview !== false;
   const myColor = myColorOfHeaders(R.headers||{});
   const h = R.headers||{};
   const CLS_LABEL = {brilliant:'Brilliant',great:'Great',best:'Best',excellent:'Excellent',good:'Good',book:'Book',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',q:'?'};
   let detail = '<p class="small muted">Start position — use arrows or click a move.</p>';
-  if(branchMove){
+  if(branchActive){
     const bdelta = (branchMove.wpBefore!=null && branchMove.wpAfter!=null) ? Math.round(branchMove.wpAfter-branchMove.wpBefore) : null;
     const branchLabel = R.branch && R.branch.kind==='best' ? 'Best line' : 'Alternative line';
     detail = `<p class="small"><b>${branchLabel}:</b> ${branchMove.moveNum}${branchMove.mover==='w'?'.':'...'} ${esc(branchMove.san)}</p>`+
-      (branchMove.evalAfter?`<p class="small">Eval: ${evalLabel(branchMove.evalBefore)} → ${evalLabel(branchMove.evalAfter)}${bdelta!=null?` · <b style="color:${bdelta>=0?'var(--green)':'var(--blun)'}">${bdelta>=0?'+':''}${bdelta}% win chance</b>`:''}</p>`:'');
+      (branchMove.evalAfter?`<p class="small">Eval: ${evalLabel(branchMove.evalBefore)} → ${evalLabel(branchMove.evalAfter)}${bdelta!=null?` · <b style="color:${bdelta>=0?'var(--green)':'var(--blun)'}">${bdelta>=0?'+':''}${bdelta}% ${branchMove.mover==='w'?'White':'Black'} win chance</b>`:''}</p>`:'');
   }else if(curPly){
     const cls = curPly.cls||'q';
     detail = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
@@ -1654,7 +1660,8 @@ function refreshBuilderUI(){
 function mountReviewBoard(){
   const el = $('#review-board');
   if(!el || !Review.data) return;
-  const ply = Math.min(Review.nav, Review.hist.length);
+  const branchEnd = Review.branch ? Review.branch.basePly + Review.branch.moves.length : -1;
+  const ply = Review.branch && Review.nav>=Review.branch.basePly && Review.nav<=branchEnd ? Review.nav : Math.min(Review.nav, Review.hist.length);
   const {g} = Review.boardAt(ply);
   const myColor = myColorOfHeaders(Review.headers||{});
   Board.init(el, g, { color: Review.flipped ? (myColor==='b'?'w':'b') : (myColor||'w'), interactive:true });
@@ -2001,9 +2008,6 @@ function syncBuilderBranch(B){
   if(branch) branch.moves=B.chess.history().join(' ');
   return branch;
 }
-function commitBuilderBranch(B){
-  return syncBuilderBranch(B);
-}
 function createBuilderBranch(B, name){
   ensureBuilderModel(B);
   const branch={id:uid(), name:String(name||('Branch '+(B.branches.length+1))).slice(0,120), moves:B.chess.history().join(' ')};
@@ -2025,8 +2029,11 @@ function recordBuilderMove(B, san){
   const pos=B.chess.history().length;
   const expected=tokens[pos];
   const diverged=!!expected && expected!==san;
+  const legal=B.chess.moves({verbose:true}).find(m=>m.san===san);
+  if(!legal) return false;
   if(diverged) createBuilderBranch(B, 'Alternative');
-  try{ B.chess.move(san); }catch(e){ return false; }
+  const applied=B.chess.move({from:legal.from,to:legal.to,promotion:legal.promotion});
+  if(!applied) return false;
   // Replaying an existing continuation must not erase its stored suffix;
   // a newly-created divergent branch must be committed with the new move.
   if(diverged || !expected) syncBuilderBranch(B);
@@ -2046,6 +2053,7 @@ function commitBuilderBoard(B){
   const stored=sanitizeMoves(branch.moves||'');
   const isPrefixOfStored=stored.length>=live.length && stored.slice(0,live.length).every((tok,i)=>tok===live[i]);
   if(isPrefixOfStored && live.length<stored.length) return branch; // seeking: keep the committed suffix
+  if(stored.length===live.length && stored.every((tok,i)=>tok===live[i])) return branch;
   branch.moves=live.join(' ');
   return branch;
 }
@@ -2057,8 +2065,9 @@ function savePlaybook(){
   const branch = activeBuilderBranch(B);
   if(!branch) return;
   const nameInput = $('#bb-name');
+  const branchFen=(()=>{ const g=new Chess(); for(const tok of sanitizeMoves(branch.moves||'')){ if(!g.move(tok)) break; } return g.fen(); })();
   Store.state.playbook = { name: (nameInput && nameInput.value.trim()) || B.name || '',
-    moves: branch.moves, fen: B.chess.fen(), branches: B.branches.map(b=>({id:b.id,name:b.name,moves:b.moves})), activeBranchId: B.activeBranchId, updated: Date.now() };
+    moves: branch.moves, fen: branchFen, branches: B.branches.map(b=>({id:b.id,name:b.name,moves:b.moves})), activeBranchId: B.activeBranchId, updated: Date.now() };
   Store.save();
 }
 function restorePlaybook(){

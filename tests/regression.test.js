@@ -591,6 +591,19 @@ test('seeking a builder board does not truncate its stored continuation when the
   assert.equal(B.branches[0].moves, 'e4 e5 Nf3', 'seeking to a prefix must not erase the stored suffix');
 });
 
+test('an illegal builder move does not create a branch', () => {
+  const { context } = loadApp();
+  const { recordBuilderMove } = context.__test;
+  const B = { chess: new Chess(), name: 'Main', branches: [{ id: 'main', name: 'Main', moves: 'e4 e5 Nf3' }], activeBranchId: 'main' };
+  B.chess.move('e4'); B.chess.move('e5');
+  const before = B.chess.history().join(' ');
+  assert.equal(recordBuilderMove(B, 'e4'), false);
+  assert.equal(B.branches.length, 1);
+  assert.equal(B.activeBranchId, 'main');
+  assert.equal(B.branches[0].moves, 'e4 e5 Nf3');
+  assert.equal(B.chess.history().join(' '), before);
+});
+
 test('review alternative deltas use the mover point of view and label best lines correctly', async () => {
   const { context } = loadApp();
   const { Review, Engine, renderReviewReport } = context.__test;
@@ -611,6 +624,8 @@ test('review alternative deltas use the mover point of view and label best lines
   assert.ok(Review.branch.wpAfter > Review.branch.wpBefore, 'Black improvement must be positive from Black POV');
   const alternativeHtml = renderReviewReport();
   assert.match(alternativeHtml, /Alternative line/);
+  assert.match(alternativeHtml, /Eval:/);
+  assert.match(alternativeHtml, /\+\d+% Black win chance/);
   assert.doesNotMatch(alternativeHtml, /-5% win chance/);
   Engine.analyse = original;
 });
@@ -632,6 +647,66 @@ test('playBest labels its branch as a best line', () => {
   assert.equal(Review.playBest(), true);
   assert.equal(Review.branch.kind, 'best');
   assert.match(renderReviewReport(), /Best line/);
+});
+
+test('a best line does not report the played move evaluation as the best continuation', () => {
+  const { context } = loadApp();
+  const { Review, renderReviewReport } = context.__test;
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'best-blunder', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: { best: 'c7c5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 }, evalAfter: { best: 'g1f3', bestCpWhite: 800, bestMateWhite: null, secondCpWhite: 0 }, cls: 'blunder', bestUci: 'c7c5', bestSan: 'c5' }
+    ] });
+  Review.setPly(1);
+  assert.equal(Review.playBest(), true);
+  const html = renderReviewReport();
+  assert.match(html, /Best line:<\/b> 1\.\.\. c5/);
+  assert.doesNotMatch(html, /Eval:/, 'a best-move branch must not reuse the played move evaluation');
+  assert.match(html, /<div class="eval-num">\?<\/div>/, 'a best line without its own analysis must not fall back to the mainline eval');
+});
+
+test('returning to the base of an alternative branch renders the mainline position', async () => {
+  const { context } = loadApp();
+  const { Review, Engine, renderReviewReport } = context.__test;
+  const original = Engine.analyse;
+  Engine.analyse = async () => ({ best: 'e7e5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0, bestPv: 'e7e5', secondPv: 'c7c5' });
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'branch-base', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: { best: 'e7e5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 }, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: { best: 'c7c5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 }, evalAfter: { best: 'g1f3', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 }, cls: 'good' }
+    ] });
+  Review.setPly(1);
+  assert.equal(await Review.playAlternative('c7', 'c5'), true);
+  Review.setPly(1);
+  const html = renderReviewReport();
+  assert.doesNotMatch(html, /Alternative line:/);
+  assert.match(html, /2\. Nf3|Eval:/);
+  Engine.analyse = original;
+});
+
+test('an alternative from the final position renders its branch', async () => {
+  const { context } = loadApp();
+  const { Review, Engine, renderReviewReport } = context.__test;
+  const original = Engine.analyse;
+  Engine.analyse = async () => ({ best: 'g8f6', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0, bestPv: 'g8f6', secondPv: 'c7c5' });
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'final-probe', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: { best: 'c7c5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 }, evalAfter: { best: 'g1f3', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 }, cls: 'good' }
+    ] });
+  Review.setPly(2);
+  assert.equal(await Review.playAlternative('d2', 'd4'), true);
+  assert.equal(Review.nav, 3);
+  const html = renderReviewReport();
+  assert.match(html, /Alternative line:<\/b> 2\. d4/);
+  assert.match(html, /Eval:/);
+  Engine.analyse = original;
 });
 
 test('automatic chess.com sync accepts finished PGNs with trailing comments and NAGs', async () => {
