@@ -674,6 +674,20 @@ test('board arrows can be created, rendered, and cleared by the user', () => {
   assert.equal(Board.arrows.length, 0);
 });
 
+test('board arrows are scoped to the current board session', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const first = context.document.createElement('div');
+  const second = context.document.createElement('div');
+  Board.clearArrows();
+  Board.init(first, new Chess(), { color: 'w', interactive: true });
+  Board.addArrow('e2', 'e4');
+  assert.equal(Board.arrows.length, 1);
+  Board.init(second, new Chess(), { color: 'w', interactive: true });
+  assert.equal(Board.arrows.length, 0, 'arrows must not leak into a new board');
+  Board.clearArrows();
+});
+
 test('automatic chess.com sync analyzes only finished, new games while the app is open', async () => {
   const { context } = loadApp();
   const { App, Store, Importer } = context.__test;

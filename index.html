@@ -915,7 +915,7 @@ const Board = {
     this.chess = chess;
     this.pieces.clear();
     el.innerHTML = '';  // wipe any previous board DOM (squares, overlays, pieces)
-    this.selected = null; this.arrows = this.arrows || [];
+    this.selected = null; this.arrows = sameEl ? (this.arrows || []) : [];
     this.focusSquare = this.color==='b' ? 'e8' : 'e2';
     this.lastMove = null; this.bestMove = null;
     this._buildSquaresOnce();
@@ -1033,7 +1033,7 @@ const Board = {
     if(i>=0) this.arrows.splice(i,1); else this.arrows.push({from,to});
     this.render(); return true;
   },
-  clearArrows(){ this.arrows=[]; this._renderOverlays(); },
+  clearArrows(){ this.arrows=[]; if(this.el) this._renderOverlays(); },
   _renderOverlays(){
     let layer = this.el.querySelector('.overlay');
     if(!layer){
@@ -2252,6 +2252,7 @@ const Play = {
     const previousLinePly=beforeLen;
     Engine.cancelPlay();
     this._turnToken++;
+    S.turnToken=this._turnToken;
     this._thinking=false;
     const hist=S.chess.history({verbose:true});
     // Undo one complete turn: the engine reply and the human move that led to it.
