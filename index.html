@@ -1099,7 +1099,7 @@ const Board = {
   },
   _teardownEvents(){
     if(this._boundEl && this._handlers) for(const [type, fn, opts] of this._handlers) this._boundEl.removeEventListener(type, fn, opts);
-    this._boundEl=null; this._eventsBound=false; this._handlers=null; this._keyboardHandler=null; this._drag=null;
+    this._boundEl=null; this._eventsBound=false; this._handlers=null; this._keyboardHandler=null; this._drag=null; this._arrowDrag=null;
   },
   _bindEvents(){
     if(this._eventsBound && this._boundEl === this.el) return;
@@ -1138,6 +1138,7 @@ const Board = {
       return f+r;
     };
     this._sqFromEvent = sqFromEvent;
+    listen('contextmenu', e=>{ if(this.interactive) e.preventDefault(); });
     listen('click', e=>{
       if(!this.interactive) return;
       if(this._suppressClick && Date.now()-this._suppressClick < 150) return;
@@ -1310,9 +1311,11 @@ const Review = {
     const currentPly=this.plys[this.nav] || null;
     const before=currentPly && currentPly.evalBefore;
     const after=result;
-    const wpBefore=before && isEval(before) ? wpWhiteOf(before) : null;
-    const wpAfter=after && isEval(after) ? wpWhiteOf(after) : null;
-    this.branch={basePly:this.nav,fen:g.fen(),moves:[uci],move:{san:moved.san,uci,mover:g.turn(),moveNum:Math.floor(this.nav/2)+1},evalBefore:before,evalAfter:after,wpBefore,wpAfter};
+    const mover=g.turn();
+    const wpForMover=ev=>{ if(!ev || !isEval(ev)) return null; const wpWhite=wpWhiteOf(ev); return mover==='w' ? wpWhite : 100-wpWhite; };
+    const wpBefore=wpForMover(before);
+    const wpAfter=wpForMover(after);
+    this.branch={kind:'alternative',basePly:this.nav,fen:g.fen(),moves:[uci],move:{san:moved.san,uci,mover,moveNum:Math.floor(this.nav/2)+1},evalBefore:before,evalAfter:after,wpBefore,wpAfter};
     this.nav=this.nav+1; render(); return true;
   },
   playBest(){
@@ -1327,7 +1330,8 @@ const Review = {
     const san=nextHistory[nextHistory.length-1];
     if(!san) return false;
     const mover=g.turn();
-    this.branch={basePly:this.nav,fen:g.fen(),moves:[ply.bestUci],move:{san,uci:ply.bestUci,mover,moveNum:Math.floor(this.nav/2)+1},evalBefore:ply.evalBefore||null,evalAfter:ply.evalAfter||null,wpBefore:ply.evalBefore&&isEval(ply.evalBefore)?wpWhiteOf(ply.evalBefore):null,wpAfter:ply.evalAfter&&isEval(ply.evalAfter)?wpWhiteOf(ply.evalAfter):null};
+    const wpForMover=ev=>{ if(!ev || !isEval(ev)) return null; const wpWhite=wpWhiteOf(ev); return mover==='w' ? wpWhite : 100-wpWhite; };
+    this.branch={kind:'best',basePly:this.nav,fen:g.fen(),moves:[ply.bestUci],move:{san,uci:ply.bestUci,mover,moveNum:Math.floor(this.nav/2)+1},evalBefore:ply.evalBefore||null,evalAfter:ply.evalAfter||null,wpBefore:wpForMover(ply.evalBefore),wpAfter:wpForMover(ply.evalAfter)};
     this.nav=this.nav+1; render(); return true;
   },
 };
@@ -1347,8 +1351,8 @@ function renderReview(){
   if(imp.loading) list = '<div class="card card-pad muted">Loading your games...</div>';
   else if(imp.error) list = `<div class="banner warn">Could not load games: ${esc(imp.error)} — paste PGN still works.</div>`;
   else if(imp.games){
-        const list=Array.isArray(imp.games)?imp.games:[];
-        const visibleGames = list.filter(gm=>imp.filter==='all'||gm.time_class===imp.filter);
+        const games = Array.isArray(imp.games)?imp.games:[];
+        const visibleGames = games.filter(gm=>imp.filter==='all'||gm.time_class===imp.filter);
         const rows = visibleGames.map(gm=>{
       const color=myColorOf(gm); const opp=color==='w'?gm.black:gm.white; if(!opp) return '';
       const idx=imp.games.indexOf(gm);
@@ -1422,7 +1426,8 @@ function renderReviewReport(){
   let detail = '<p class="small muted">Start position — use arrows or click a move.</p>';
   if(branchMove){
     const bdelta = (branchMove.wpBefore!=null && branchMove.wpAfter!=null) ? Math.round(branchMove.wpAfter-branchMove.wpBefore) : null;
-    detail = `<p class="small"><b>Alternative line:</b> ${branchMove.moveNum}${branchMove.mover==='w'?'.':'...'} ${esc(branchMove.san)}</p>`+
+    const branchLabel = R.branch && R.branch.kind==='best' ? 'Best line' : 'Alternative line';
+    detail = `<p class="small"><b>${branchLabel}:</b> ${branchMove.moveNum}${branchMove.mover==='w'?'.':'...'} ${esc(branchMove.san)}</p>`+
       (branchMove.evalAfter?`<p class="small">Eval: ${evalLabel(branchMove.evalBefore)} → ${evalLabel(branchMove.evalAfter)}${bdelta!=null?` · <b style="color:${bdelta>=0?'var(--green)':'var(--blun)'}">${bdelta>=0?'+':''}${bdelta}% win chance</b>`:''}</p>`:'');
   }else if(curPly){
     const cls = curPly.cls||'q';
@@ -1924,7 +1929,7 @@ async function runAnalysis(list, {jumpTo=false, background=false}={}){
   let completed = 0;
   const currentRun = ()=>App.analysisRunId===runId && !App.analysisCancelled;
   for(const gm of list){
-    if(!gm || typeof gm.pgn!=='string' || !gm.pgn.trim()){ if(!background) toast('Invalid game data','err'); return 0; }
+    if(!gm || typeof gm.pgn!=='string' || !gm.pgn.trim()){ if(!background) toast('Invalid game data','err'); continue; }
     const rawKey = typeof gm.url==='string' ? gm.url : '';
     const fallbackKey = 'pgn:'+hashStr(gm.pgn);
     const key = safeRecordKey(rawKey || fallbackKey, fallbackKey);
@@ -2025,7 +2030,6 @@ function recordBuilderMove(B, san){
   // Replaying an existing continuation must not erase its stored suffix;
   // a newly-created divergent branch must be committed with the new move.
   if(diverged || !expected) syncBuilderBranch(B);
-  commitBuilderBoard(B);
   B._restored=true; return true;
 }
 function builderDiverges(B, move){
@@ -2041,7 +2045,8 @@ function commitBuilderBoard(B){
   const live=B.chess.history();
   const stored=sanitizeMoves(branch.moves||'');
   const isPrefixOfStored=stored.length>=live.length && stored.slice(0,live.length).every((tok,i)=>tok===live[i]);
-  if(isPrefixOfStored) branch.moves=live.join(' ');
+  if(isPrefixOfStored && live.length<stored.length) return branch; // seeking: keep the committed suffix
+  branch.moves=live.join(' ');
   return branch;
 }
 function savePlaybook(){
@@ -2187,7 +2192,8 @@ const App = {
         if(!gm || typeof gm.pgn!=='string') return false;
         const pgn=gm.pgn.trim();
         if(!pgn || /\bnoresult\b|\*\s*$/.test(pgn)) return false;
-        if(!/\b(1-0|0-1|1\/2-1\/2)\s*$/.test(pgn)) return false;
+        const moveText = pgn.replace(/\{[^}]*\}/g,' ').replace(/\[[^\]]*\]/g,' ').replace(/\$\d+/g,' ').replace(/;[^\n]*/g,' ').trim();
+        if(!/\b(1-0|0-1|1\/2-1\/2)\b/.test(moveText)) return false;
         if(!Number.isFinite(Number(gm.end_time)) || Number(gm.end_time)<=0) return false;
         const key=safeRecordKey(typeof gm.url==='string'&&gm.url?gm.url:'pgn:'+hashStr(pgn),'record');
         return !Object.prototype.hasOwnProperty.call(Store.state.analyzed,key);

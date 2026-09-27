@@ -580,6 +580,93 @@ test('replaying a stored builder continuation does not truncate the branch', () 
   assert.equal(B.branches[0].moves, 'e4 e5 Nf3');
 });
 
+test('seeking a builder board does not truncate its stored continuation when the draft is saved', () => {
+  const { context } = loadApp();
+  const { Store, App, savePlaybook } = context.__test;
+  Store.state = context.defaultState();
+  const B = { chess: new Chess(), name: 'Main', branches: [{ id: 'main', name: 'Main', moves: 'e4 e5 Nf3' }], activeBranchId: 'main' };
+  B.chess.move('e4'); B.chess.move('e5'); B.chess.move('Nf3'); B.chess.undo(); B.chess.undo();
+  App.builder = B;
+  savePlaybook();
+  assert.equal(B.branches[0].moves, 'e4 e5 Nf3', 'seeking to a prefix must not erase the stored suffix');
+});
+
+test('review alternative deltas use the mover point of view and label best lines correctly', async () => {
+  const { context } = loadApp();
+  const { Review, Engine, renderReviewReport } = context.__test;
+  const original = Engine.analyse;
+  Engine.analyse = async () => ({ best: 'c7c5', bestCpWhite: -100, bestMateWhite: null, secondCpWhite: 0, bestPv: 'c7c5', secondPv: 'e7e6' });
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'pov', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' }
+    ] });
+  Review.plys[1].evalBefore = { best: 'e7e5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 };
+  Review.plys[1].evalAfter = { best: 'e7e5', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 };
+  Review.setPly(1);
+  assert.equal(await Review.playAlternative('c7', 'c5'), true);
+  assert.equal(Review.branch.kind, 'alternative');
+  assert.ok(Review.branch.wpAfter > Review.branch.wpBefore, 'Black improvement must be positive from Black POV');
+  const alternativeHtml = renderReviewReport();
+  assert.match(alternativeHtml, /Alternative line/);
+  assert.doesNotMatch(alternativeHtml, /-5% win chance/);
+  Engine.analyse = original;
+});
+
+test('playBest labels its branch as a best line', () => {
+  const { context } = loadApp();
+  const { Review, renderReviewReport } = context.__test;
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'best-label', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' }
+    ] });
+  Review.plys[0].bestUci = 'e2e4';
+  Review.plys[0].evalBefore = { best: 'e2e4', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 };
+  Review.plys[0].evalAfter = { best: 'e2e4', bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0 };
+  Review.setPly(0);
+  assert.equal(Review.playBest(), true);
+  assert.equal(Review.branch.kind, 'best');
+  assert.match(renderReviewReport(), /Best line/);
+});
+
+test('automatic chess.com sync accepts finished PGNs with trailing comments and NAGs', async () => {
+  const { context } = loadApp();
+  const { App, Store, Importer } = context.__test;
+  const originalMonth = Importer.month;
+  Importer.month = async () => [{ url: 'annotated', pgn: '1. e4 e5 1-0 {gg} [%clk 0:05] $1', end_time: 200 }, { url: 'unfinished-comment', pgn: '1. e4 e5 * {still running}', end_time: 200 }, { url: 'semicolon', pgn: '1. e4 e5 0-1 ; resigned', end_time: 200 }];
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'me';
+  let received = 0;
+  const count = await App.syncChessComGames({ force: true, analyze: async list => { received = list.length; return list.length; } });
+  Importer.month = originalMonth;
+  assert.equal(count, 2);
+  assert.equal(received, 2);
+});
+
+test('background analysis skips malformed batch entries but keeps successful analyses', async () => {
+  const { context } = loadApp();
+  const { runAnalysis, Store, Engine } = context.__test;
+  const originalReady = Engine.ready;
+  const originalOffline = Engine.offline;
+  const originalAnalyse = Engine.analyse;
+  Engine.ready = true; Engine.offline = false;
+  Engine.analyse = async fen => {
+    const m = new Chess(fen).moves({ verbose: true })[0];
+    return { best: m.from + m.to + (m.promotion || ''), bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0, bestPv: m.from + m.to, secondPv: m.from + m.to };
+  };
+  Store.state = context.defaultState();
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const count = await runAnalysis([null, { pgn: 'not a game' }, { url: 'good-game', pgn: g.pgn() }], { background: true });
+  Engine.ready = originalReady; Engine.offline = originalOffline; Engine.analyse = originalAnalyse;
+  assert.equal(count, 1);
+  assert.ok(Store.state.analyzed['good-game']);
+});
+
 test('undo ignores an engine reply that arrives after the player has undrawn', async () => {
   const { context } = loadApp();
   const { Play, Engine, Store } = context.__test;
@@ -688,6 +775,18 @@ test('board arrows are scoped to the current board session', () => {
   Board.clearArrows();
 });
 
+test('board arrows cannot start a drag after the board is torn down', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  Board.init(el, new Chess(), { color: 'w', interactive: true });
+  Board._teardownEvents();
+  Board.addArrow('e2', 'e4');
+  assert.equal(Board.arrows.length, 1);
+  assert.equal(Board._arrowDrag, null);
+  Board.clearArrows();
+});
+
 test('automatic chess.com sync analyzes only finished, new games while the app is open', async () => {
   const { context } = loadApp();
   const { App, Store, Importer } = context.__test;
@@ -709,6 +808,22 @@ test('automatic chess.com sync analyzes only finished, new games while the app i
   assert.equal(typeof App.syncState, 'object');
   assert.equal(Store.state.settings.autoSyncChessCom, true);
   assert.deepEqual(App.syncState.lastError, null);
+});
+
+test('renderReview renders loaded chess.com games instead of throwing on a shadowed list variable', () => {
+  const { context } = loadApp();
+  const { App, Store, renderReview } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'me';
+  App.view = 'review';
+  App.importState.games = [{ url: 'g1', pgn: '1. e4 e5 1-0', end_time: 200, time_class: 'rapid',
+    white: { username: 'me', rating: 1200 }, black: { username: 'them', rating: 1300 } }];
+  App.importState.filter = 'all';
+  App.importState.selected.clear();
+  let html = '';
+  assert.doesNotThrow(() => { html = renderReview(); }, 'renderReview must not throw when games are loaded');
+  assert.match(html, /them/);
+  assert.match(html, /rapid/);
 });
 
 test('resign button is present during an unfinished play session', () => {
