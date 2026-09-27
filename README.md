@@ -2,22 +2,24 @@
 
 ChessLab is a local-first chess opening trainer and game-review app. It runs as a single browser application, needs no build step, and keeps your chess data in your browser.
 
-**Current release:** `v2.6.1`
+**Current release:** `v2.7.0`
 
 ---
 
 ## What ChessLab does
 
-- **Play** — play a game against Stockfish with a chosen color and skill level.
-- **Openings** — build a line by playing moves for both sides, save it, and practise from where the line ends.
-- **Review** — import or paste a PGN, analyse it, and step through evaluations, best moves, and classifications.
+- **Play** — play a game against Stockfish with a chosen color and skill level, undo a move or a full turn, and resign when needed.
+- **Openings** — build a line by playing moves for both sides, create and switch independent branches, save lines, and practise from any branch.
+- **Review** — import or paste a PGN, analyse it, step through evaluations and classifications, try a different move at any position, and draw board arrows.
 - **Progress** — see summaries of analysed games and saved practice records.
-- **Settings** — change the theme, username, review depth, engine strength, and data.
+- **Settings** — change the theme, username, review depth, engine strength, automatic chess.com checking, and data.
 
 ChessLab also supports:
 
-- Opening lines saved in the browser
-- Practice from a custom line or start position
+- Opening lines and multiple opening branches saved in the browser
+- Practice from a custom line, branch, or start position
+- Right-drag board arrows in Openings and Review
+- Optional automatic checking for newly finished chess.com games while ChessLab is open
 - Keyboard board navigation
 - JSON export and import
 - Strict validation of imported and persisted data
@@ -79,6 +81,12 @@ This makes the line itself the source of truth instead of requiring a separate c
 ### 3. Review a game
 
 Use **Review** to load games from a public chess.com account or paste a PGN. Analysis requires the Stockfish engine to be available.
+
+In an analysed game, select a position and try a different legal move. ChessLab analyses the alternative position and shows the evaluation before and after. Right-drag on the board to draw yellow arrows; use the eraser button to clear them.
+
+### Automatic chess.com checking
+
+Enable **Automatically check for finished chess.com games** in Settings, or use **Check for new games now**. ChessLab checks the current month while the app is open and analyses new finished games that are not already stored. It cannot detect a completed game while the browser application is closed.
 
 ### 4. Back up your data
 
@@ -197,7 +205,7 @@ If the engine cannot load:
 
 ### The page looks like an older version
 
-Check the version badge in the header. If it does not show `v2.6.1`, use a hard refresh:
+Check the version badge in the header. If it does not show `v2.7.0`, use a hard refresh:
 
 - Windows: `Ctrl + Shift + R`
 - macOS: `Cmd + Shift + R`
@@ -220,6 +228,7 @@ Confirm that it is your turn. The player color, current chess turn, and visual b
 
 - `v2.6` — hardening pass and explicit module seams
 - `v2.6.1` — opening side handoff, stricter analysis validation, Engine fallback improvements, and accessibility fixes
+- `v2.7.0` — chess.com finished-game sync, opening branches, Play undo, review alternatives with evaluation deltas, user board arrows, and post-game Resign cleanup
 
 Each release is tagged in Git so a known-good version can be recovered.
 

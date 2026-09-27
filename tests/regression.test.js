@@ -72,8 +72,8 @@ function loadApp({ storage = {} } = {}) {
   const script = inlineScripts.join('\n');
   vm.createContext(context);
   vm.runInContext(script, context, { filename: 'index-inline.js' });
-  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, classifyPly, analyzeGame, validateState, defaultState, render, runAnalysis, renderProgress, openModal, handleAction, myColorOfHeaders, validateAnalyzedChain };', context);
-  return { dom, window, context };
+  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, Importer, classifyPly, analyzeGame, validateState, defaultState, render, renderPlay, renderOpenings, renderReview, renderReviewReport, mountBuilderBoard, mountReviewBoard, runAnalysis, renderProgress, openModal, handleAction, myColorOfHeaders, validateAnalyzedChain, sanitizeMoves, ensureBuilderModel, activeBuilderBranch, createBuilderBranch, switchBuilderBranch, builderDiverges, syncBuilderBranch, savePlaybook, recordBuilderMove };', context);
+  return { dom, window, context, waitFor };
 }
 
 async function waitFor(predicate, message='condition was not met', timeoutMs=2000){
@@ -518,6 +518,196 @@ test('classifyPly detects a materially exposed played move versus the engine lin
   const c = classifyPly({ fenBefore: fen, uci: 'h1h5' }, { best: 'h1h5', bestCpWhite: 20, secondCpWhite: -120 }, { bestCpWhite: 18, secondCpWhite: -120 }, 'w', 3);
   assert.ok(c.sacPawns >= 9);
   assert.equal(c.cls, 'brilliant');
+});
+
+test('play undo rolls back the last ply and resign disappears after the game ends', () => {
+  const { context } = loadApp();
+  const { Store, App, Play, Engine, render } = context.__test;
+  const originalPlayMove = Engine.playMove;
+  Engine.playMove = () => new Promise(() => {});
+  Store.state = context.defaultState();
+  Play.start({ color: 'w', skill: 1, lineMoves: '' });
+  const S=Play.session;
+  const before = S.chess.history();
+  const turn = S.chess.turn();
+  const legal = S.chess.moves({verbose:true}).find(m=>m.color===turn);
+  S.chess.move({from:legal.from,to:legal.to,promotion:legal.promotion});
+  assert.ok(Play.session.chess.history().length > before.length);
+  assert.equal(Play.undo(), true);
+  assert.deepEqual(Play.session.chess.history(), before);
+  const played = Play.session.chess;
+  played.move('e4'); played.move('e5');
+  assert.equal(Play.undo(), true);
+  assert.deepEqual(Play.session.chess.history(), before, 'undo must take back the engine reply and the preceding human move');
+  Play.finishSession(Play.session, 'draw', 'agreement');
+  assert.equal(context.document.querySelector('[data-act="end-play"]'), null, 'resign must disappear immediately when the game ends');
+  render();
+  assert.equal(context.document.querySelector('[data-act="end-play"]'), null);
+  Play.cancel();
+  Engine.playMove = originalPlayMove;
+});
+
+test('opening branches keep independent move lines and can be restored', () => {
+  const { context } = loadApp();
+  const { Store, App, render, renderOpenings } = context.__test;
+  Store.state = context.defaultState();
+  App.builder = { chess: new Chess(), name: 'Branches', branches: [{ id: 'main', name: 'Main', moves: 'e4 e5' }], activeBranchId: 'main' };
+  App.builder.chess.move('e4'); App.builder.chess.move('e5');
+  App.view = 'openings';
+  render();
+  const html = renderOpenings();
+  assert.match(html, /Branch/);
+  App.builder.branches.push({ id: 'alt', name: 'Alternative', moves: 'e4 c5' });
+  App.builder.activeBranchId = 'alt';
+  render();
+  assert.match(renderOpenings(), /Alternative/);
+  const alt = App.builder.branches.find(b => b.id === 'alt');
+  context.switchBuilderBranch(App.builder, 'main');
+  assert.deepEqual(App.builder.chess.history(), ['e4', 'e5']);
+  context.switchBuilderBranch(App.builder, 'alt');
+  assert.deepEqual(App.builder.chess.history(), ['e4', 'c5']);
+  assert.equal(alt.moves, 'e4 c5');
+});
+
+test('replaying a stored builder continuation does not truncate the branch', () => {
+  const { context } = loadApp();
+  const B = { chess: new Chess(), name: '', branches: [{ id: 'main', name: 'Main', moves: 'e4 e5 Nf3' }], activeBranchId: 'main' };
+  B.chess.move('e4'); B.chess.move('e5'); B.chess.move('Nf3');
+  B.chess.undo(); B.chess.undo();
+  context.recordBuilderMove(B, 'e5');
+  context.recordBuilderMove(B, 'Nf3');
+  assert.deepEqual(B.chess.history(), ['e4', 'e5', 'Nf3']);
+  assert.equal(B.branches[0].moves, 'e4 e5 Nf3');
+});
+
+test('undo ignores an engine reply that arrives after the player has undrawn', async () => {
+  const { context } = loadApp();
+  const { Play, Engine, Store } = context.__test;
+  const originalPlayMove = Engine.playMove;
+  let releaseEngine;
+  let call = 0;
+  Engine.playMove = () => {
+    call++;
+    if(call === 1) return Promise.resolve('e7e5');
+    return new Promise(resolve => { releaseEngine = resolve; });
+  };
+  Store.state = context.defaultState();
+  Play.start({ color: 'w', skill: 1, lineMoves: 'e4' });
+  await waitFor(() => Play.session && Play.session.chess.history().length === 2, 'engine reply did not arrive');
+  assert.equal(Play.userPlay('d2', 'd4'), true);
+  assert.equal(Play.undo(), true);
+  assert.deepEqual(Play.session.chess.history(), ['e4', 'e5']);
+  releaseEngine('g1f3');
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(Play.session.chess.history(), ['e4', 'e5'], 'stale engine reply must not be applied after undo');
+  Play.cancel();
+  Engine.playMove = originalPlayMove;
+});
+
+test('review alternative moves analyze the new position and expose the evaluation delta', async () => {
+  const { context } = loadApp();
+  const { Review, Engine } = context.__test;
+  const original = Engine.analyse;
+  const calls = [];
+  Engine.analyse = async (fen, movetime, multiPV) => { calls.push({ fen, movetime, multiPV }); return { best: 'd2d4', bestCpWhite: 40, bestMateWhite: null, secondCpWhite: 0, bestPv: 'd2d4', secondPv: 'c2c4' }; };
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'alt', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' }
+    ] });
+  const ok = await Review.playAlternative('g1', 'f3');
+  Engine.analyse = original;
+  assert.equal(ok, true);
+  assert.ok(calls.length >= 1);
+  assert.equal(Review.branch.moves[0], 'g1f3');
+  assert.equal(typeof Review.branch.evalAfter, 'object');
+});
+
+test('a stale review alternative result cannot replace the position the user is viewing', async () => {
+  const { context } = loadApp();
+  const { Review, Engine } = context.__test;
+  const original = Engine.analyse;
+  let release;
+  Engine.analyse = () => new Promise(resolve => { release = resolve; });
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'stale', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'good' }
+    ] });
+  const pending = Review.playAlternative('g1', 'f3');
+  Review.setPly(1);
+  release({ best: 'd2d4', bestCpWhite: 40, bestMateWhite: null, secondCpWhite: 0, bestPv: 'd2d4', secondPv: 'c2c4' });
+  assert.equal(await pending, false);
+  assert.equal(Review.branch, null);
+  assert.equal(Review.nav, 1);
+  Engine.analyse = original;
+});
+
+test('automatic chess.com sync reports only successful analyses', async () => {
+  const { context } = loadApp();
+  const { App, Store, Importer } = context.__test;
+  const originalMonth = Importer.month;
+  Importer.month = async () => [{ url: 'sync-failure', pgn: '1. e4 e5 1-0', end_time: 200 }];
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'me';
+  const count = await App.syncChessComGames({ force: true, analyze: async () => 0 });
+  Importer.month = originalMonth;
+  assert.equal(count, 0);
+  assert.equal(App.syncState.lastAdded, 0);
+});
+
+test('board arrows can be created, rendered, and cleared by the user', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  const g = new Chess();
+  Board.init(el, g, { color: 'w', interactive: true });
+  Board.addArrow('e2', 'e4');
+  assert.equal(Board.arrows.length, 1);
+  Board.render();
+  assert.match(el.innerHTML, /arrow-layer/);
+  Board.clearArrows();
+  assert.equal(Board.arrows.length, 0);
+});
+
+test('automatic chess.com sync analyzes only finished, new games while the app is open', async () => {
+  const { context } = loadApp();
+  const { App, Store, Importer } = context.__test;
+  const originalMonth = Importer.month;
+  const games = [
+    { url: 'new-finished', pgn: '1. e4 e5 1-0', end_time: 200, white: { username: 'me' }, black: { username: 'them' } },
+    { url: 'old-finished', pgn: '1. e4 e5 0-1', end_time: 100, white: { username: 'me' }, black: { username: 'them' } },
+    { url: 'unfinished', pgn: '1. e4 e5 *', end_time: 300, white: { username: 'me' }, black: { username: 'them' } }
+  ];
+  Importer.month = async () => games;
+  Store.state = context.defaultState();
+  Store.state.analyzed['old-finished'] = { key: 'old-finished', pgn: games[1].pgn, headers: {}, summary: {}, plies: [] };
+  Store.state.settings.username = 'me';
+  let analyzed = 0;
+  const count = await App.syncChessComGames({ force: true, analyze: async list => { analyzed += list.length; return list.length; } });
+  Importer.month = originalMonth;
+  assert.equal(count, 1);
+  assert.equal(analyzed, 1);
+  assert.equal(typeof App.syncState, 'object');
+  assert.equal(Store.state.settings.autoSyncChessCom, true);
+  assert.deepEqual(App.syncState.lastError, null);
+});
+
+test('resign button is present during an unfinished play session', () => {
+  const { context } = loadApp();
+  const { Store, App, Play, Engine, render } = context.__test;
+  const originalPlayMove = Engine.playMove;
+  Engine.playMove = () => new Promise(() => {});
+  Store.state = context.defaultState();
+  Play.start({ color: 'w', skill: 1, lineMoves: '' });
+  App.view = 'play'; render();
+  assert.ok(context.document.querySelector('[data-act="end-play"]'));
+  Play.cancel();
+  Engine.playMove = originalPlayMove;
 });
 
 test('reset data closes the modal through its focus-trap cleanup path', () => {
