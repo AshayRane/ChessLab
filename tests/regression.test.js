@@ -169,6 +169,7 @@ test('entering Openings from another tab starts with a clear board', () => {
   assert.equal(App.builder.branches[0].moves, '', 'the entering board must not restore the old draft branch');
   assert.equal(App.builder.name, '');
   assert.equal(Store.state.openingLines.length, 1, 'saved lines must remain available');
+  assert.equal(Store.state.playbook, null, 'entering Openings must discard the orphaned draft');
   const movesText = context.document.querySelector('.moves-grid').textContent;
   assert.match(movesText, /Play moves on the board/i);
 });
@@ -603,6 +604,251 @@ test('classifyPly detects a materially exposed played move versus the engine lin
   const c = classifyPly({ fenBefore: fen, uci: 'h1h5' }, { best: 'h1h5', bestCpWhite: 20, secondCpWhite: -120 }, { bestCpWhite: 18, secondCpWhite: -120 }, 'w', 3);
   assert.ok(c.sacPawns >= 9);
   assert.equal(c.cls, 'brilliant');
+});
+
+test('Progress statistics stay scoped to the saved account', () => {
+  const { context } = loadApp();
+  const { Store, renderProgress } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: 'Me' },
+    analyzed: {
+      mine: { key: 'mine', headers: { White: 'Me', Black: 'Alice' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 }, black: { accuracy: 50, blunder: 4, mistake: 1 } }, date: '2026-01-02', plies: [] },
+      other: { key: 'other', username: 'OtherPlayer', headers: { White: 'OtherPlayer', Black: 'Bob' }, summary: { white: { accuracy: 50, blunder: 4, mistake: 1 }, black: { accuracy: 95, blunder: 0, mistake: 0 } }, date: '2026-01-01', plies: [] }
+    }
+  };
+  const html = renderProgress();
+  assert.match(html, /Avg accuracy<\/div><div class="value">95%/);
+  assert.doesNotMatch(html, /73%/);
+  assert.match(html, /1 game analyzed/);
+});
+
+test('Progress empty state explains missing account and foreign-game cases', () => {
+  const { context } = loadApp();
+  const { Store, renderProgress } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: '' },
+    analyzed: {
+      foreign: { key: 'foreign', username: 'OtherPlayer', headers: { White: 'OtherPlayer', Black: 'Rival' }, summary: { white: { accuracy: 90, blunder: 0, mistake: 0 } }, date: '2026-01-01', plies: [] },
+      another: { key: 'another', username: 'AnotherPlayer', headers: { White: 'AnotherPlayer', Black: 'Rival' }, summary: { white: { accuracy: 80, blunder: 1, mistake: 0 } }, date: '2026-01-02', plies: [] }
+    }
+  };
+  const html = renderProgress();
+  assert.match(html, /Choose a player/);
+  assert.match(html, /OtherPlayer/);
+  assert.match(html, /AnotherPlayer/);
+});
+
+test('Progress offers a username picker when Review-only games span multiple handles', () => {
+  const { context } = loadApp();
+  const { App, Store, renderProgress, handleAction } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: '' },
+    analyzed: {
+      alice: { key: 'alice', username: 'Alice', headers: { White: 'Alice', Black: 'Rival' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 } }, date: '2026-01-02', plies: [] },
+      bob: { key: 'bob', username: 'Bob', headers: { White: 'Bob', Black: 'Rival' }, summary: { white: { accuracy: 70, blunder: 3, mistake: 1 } }, date: '2026-01-01', plies: [] }
+    }
+  };
+  App.importState = { ...App.importState, username: '', loadedUsername: '', usernameExplicit: false };
+  App.progressScope = '';
+  const picker = renderProgress();
+  assert.match(picker, /Choose a player/);
+  assert.match(picker, /data-act="progress-scope" data-username="Alice"/);
+  handleAction({ dataset: { act: 'progress-scope', username: 'Alice' } });
+  const scoped = renderProgress();
+  assert.match(scoped, /Avg accuracy<\/div><div class="value">95%/);
+  assert.match(scoped, /1 game analyzed/);
+  assert.doesNotMatch(scoped, /70%/);
+});
+
+test('Progress picker ignores an abandoned Review handle and keeps an explicit pick sticky', () => {
+  const { context } = loadApp();
+  const { App, Store, renderProgress, handleAction } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: '' },
+    analyzed: {
+      alice: { key: 'alice', username: 'Alice', headers: { White: 'Alice', Black: 'Rival' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 } }, date: '2026-01-02', plies: [] },
+      bob: { key: 'bob', username: 'Bob', headers: { White: 'Bob', Black: 'Rival' }, summary: { white: { accuracy: 70, blunder: 3, mistake: 1 } }, date: '2026-01-01', plies: [] }
+    }
+  };
+  App.importState = { ...App.importState, username: 'AbandonedTypo', loadedUsername: '', usernameExplicit: true };
+  App.progressScope = '';
+  const picker = renderProgress();
+  assert.match(picker, /Choose a player/);
+  assert.match(picker, /data-act="progress-scope" data-username="Alice"/);
+  handleAction({ dataset: { act: 'progress-scope', username: 'Alice' } });
+  App.importState.username = 'Bob';
+  const scoped = renderProgress();
+  assert.match(scoped, /Avg accuracy<\/div><div class="value">95%/);
+  assert.match(scoped, /1 game analyzed/);
+  assert.doesNotMatch(scoped, /70%/);
+});
+
+test('Progress offers a change-player control after a handle is selected', () => {
+  const { context } = loadApp();
+  const { App, Store, renderProgress, handleAction } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: '' },
+    analyzed: {
+      alice: { key: 'alice', username: 'Alice', headers: { White: 'Alice', Black: 'Rival' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 } }, date: '2026-01-02', plies: [] },
+      bob: { key: 'bob', username: 'Bob', headers: { White: 'Bob', Black: 'Rival' }, summary: { white: { accuracy: 70, blunder: 3, mistake: 1 } }, date: '2026-01-01', plies: [] }
+    }
+  };
+  App.importState = { ...App.importState, username: '', loadedUsername: '', usernameExplicit: false };
+  App.progressScope = '';
+  handleAction({ dataset: { act: 'progress-scope', username: 'Alice' } });
+  const scoped = renderProgress();
+  assert.match(scoped, /data-act="progress-scope-clear"/);
+  assert.match(scoped, /data-act="progress-scope" data-username="Bob"/);
+});
+
+test('an explicit Progress handle pick overrides the saved Settings account', () => {
+  const { context } = loadApp();
+  const { App, Store, renderProgress, handleAction } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: 'Me' },
+    analyzed: {
+      mine: { key: 'mine', username: 'Me', headers: { White: 'Me', Black: 'Rival' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 } }, date: '2026-01-02', plies: [] },
+      alice: { key: 'alice', username: 'Alice', headers: { White: 'Alice', Black: 'Rival' }, summary: { white: { accuracy: 40, blunder: 8, mistake: 2 } }, date: '2026-01-01', plies: [] }
+    }
+  };
+  App.importState = { ...App.importState, username: '', loadedUsername: '', games: null, usernameExplicit: false };
+  App.progressScope = '';
+  const before = renderProgress();
+  assert.match(before, /Viewing Me/);
+  assert.match(before, /95%/);
+  handleAction({ dataset: { act: 'progress-scope', username: 'Alice' } });
+  const after = renderProgress();
+  assert.match(after, /Viewing Alice/);
+  assert.match(after, /Avg accuracy<\/div><div class="value">40%/);
+  assert.doesNotMatch(after, />95%</);
+  handleAction({ dataset: { act: 'progress-scope-clear' } });
+  const restored = renderProgress();
+  assert.match(restored, /Viewing Me/);
+  assert.match(restored, /Avg accuracy<\/div><div class="value">95%/);
+});
+
+test('Progress keeps the picker reachable when the Settings account has no games', () => {
+  const { context } = loadApp();
+  const { App, Store, renderProgress } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: 'Ghost' },
+    analyzed: {
+      alice: { key: 'alice', username: 'Alice', headers: { White: 'Alice', Black: 'Rival' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 } }, date: '2026-01-02', plies: [] },
+      bob: { key: 'bob', username: 'Bob', headers: { White: 'Bob', Black: 'Rival' }, summary: { white: { accuracy: 70, blunder: 3, mistake: 1 } }, date: '2026-01-01', plies: [] }
+    }
+  };
+  App.importState = { ...App.importState, username: '', loadedUsername: '', games: null, usernameExplicit: false };
+  App.progressScope = '';
+  const html = renderProgress();
+  assert.match(html, /data-act="progress-scope" data-username="Alice"/);
+  assert.match(html, /data-act="progress-scope" data-username="Bob"/);
+  assert.match(html, /Not your games/);
+});
+
+test('Progress keeps stats for a Review-only username when Settings has no account', () => {
+  const { context } = loadApp();
+  const { Store, renderProgress } = context.__test;
+  Store.state = {
+    ...Store.state,
+    settings: { ...Store.state.settings, username: '' },
+    analyzed: {
+      reviewOnly: { key: 'reviewOnly', username: 'MyHandle', headers: { White: 'MyHandle', Black: 'Rival' }, summary: { white: { accuracy: 95, blunder: 0, mistake: 0 }, black: { accuracy: 50, blunder: 4, mistake: 1 } }, date: '2026-01-02', plies: [] }
+    }
+  };
+  const html = renderProgress();
+  assert.match(html, /Avg accuracy<\/div><div class="value">95%/);
+  assert.match(html, /1 game analyzed/);
+});
+
+test('Analyze Selected stamps the username captured when games were loaded', async () => {
+  const { context } = loadApp();
+  const { App, Store, Engine, render, handleAction } = context.__test;
+  const originalReady = Engine.ready;
+  const originalOffline = Engine.offline;
+  const originalAnalyse = Engine.analyse;
+  Engine.ready = true; Engine.offline = false;
+  Engine.analyse = async fen => {
+    const move = new Chess(fen).moves({ verbose: true })[0];
+    return { best: move.from + move.to, bestCpWhite: 0, bestMateWhite: null, secondCpWhite: 0, bestPv: move.from + move.to, secondPv: move.from + move.to };
+  };
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'SavedUser';
+  App.view = 'review';
+  App.importState = { ...App.importState, username: 'LoadedUser', loadedUsername: 'LoadedUser', usernameExplicit: true, games: [{ url: 'loaded-game', pgn: g.pgn() }], selected: new Set([0]) };
+  render();
+  const input = context.document.querySelector('#review-username');
+  input.value = 'EditedAfterLoad';
+  input.dispatchEvent(new context.window.Event('input', { bubbles: true }));
+  handleAction({ dataset: { act: 'analyze-selected' } });
+  await waitFor(() => Store.state.analyzed['loaded-game'], 'selected game analysis did not finish');
+  assert.equal(Store.state.analyzed['loaded-game'].username, 'LoadedUser');
+  Engine.ready = originalReady; Engine.offline = originalOffline; Engine.analyse = originalAnalyse;
+});
+
+test('re-rendering Review preserves username focus and caret position', () => {
+  const { context } = loadApp();
+  const { App, render } = context.__test;
+  App.view = 'review';
+  render();
+  const input = context.document.querySelector('#review-username');
+  input.focus();
+  input.value = 'PlayerName';
+  input.dispatchEvent(new context.window.Event('input', { bubbles: true }));
+  input.setSelectionRange(4, 4);
+  render();
+  const next = context.document.querySelector('#review-username');
+  assert.equal(context.document.activeElement, next, 're-render must not steal username focus');
+  assert.equal(next.value, 'PlayerName');
+  assert.equal(next.selectionStart, 4);
+});
+
+test('re-rendering Review does not pull focus back into the page while a modal is open', () => {
+  const { context } = loadApp();
+  const { App, render } = context.__test;
+  App.view = 'review';
+  render();
+  const input = context.document.querySelector('#review-username');
+  input.focus();
+  context.document.getElementById('modal-root').innerHTML = '<div class="modal-backdrop"><input id="modal-input"></div>';
+  render();
+  assert.notEqual(context.document.activeElement, context.document.querySelector('#review-username'));
+  assert.notEqual(context.document.activeElement, context.document.getElementById('modal-input'));
+});
+
+test('the import error banner keeps its context and hint for string and non-string errors', () => {
+  const { context } = loadApp();
+  const { App, Engine, renderReview } = context.__test;
+  const originalOffline = Engine.offline;
+  const originalReady = Engine.ready;
+  Engine.offline = false;
+  Engine.ready = true;
+  App.importState = { ...App.importState, loading: false, games: null, error: 'HTTP 503' };
+  let html = renderReview();
+  assert.match(html, /Could not load games: HTTP 503/);
+  assert.match(html, /paste PGN still works/);
+  Engine.offline = false;
+  Engine.ready = false;
+  App.importState = { ...App.importState, loading: true, error: 'fetch failed' };
+  html = renderReview();
+  assert.doesNotMatch(html, /Could not load games:.*paste PGN still works/);
+  App.importState = { ...App.importState, loading: false, error: 123 };
+  assert.doesNotThrow(() => renderReview());
+  Engine.offline = true;
+  App.importState = { ...App.importState, error: 'Engine offline — game import is unavailable until the engine is ready.', errorKind: 'validation' };
+  html = renderReview();
+  assert.match(html, /Engine offline/);
+  assert.doesNotMatch(html, /Could not load games/);
+  assert.doesNotMatch(html, /Could not load games:.*paste PGN still works/);
+  Engine.offline = originalOffline;
+  Engine.ready = originalReady;
 });
 
 test('checkmate names the winning side and color in the play result', () => {

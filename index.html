@@ -219,7 +219,7 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.3</span>
+<span class="ver-badge" title="ChessLab version">v2.7.4</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -1352,12 +1352,12 @@ function renderReview(){
   const imp = App.importState;
   let list='';
   if(imp.loading) list = '<div class="card card-pad muted">Loading your games...</div>';
-      else if(imp.error) list = `<div class="banner warn">${esc(imp.error)}${imp.error.includes('username')?' — paste PGN still works.':''}</div>`;
+  else if(imp.error) list = `<div class="banner warn">${imp.errorKind==='validation'?'':'Could not load games: '}${esc(String(imp.error))}${Engine.ready?' — paste PGN still works.':''}</div>`;
   else if(imp.games){
         const games = Array.isArray(imp.games)?imp.games:[];
         const visibleGames = games.filter(gm=>imp.filter==='all'||gm.time_class===imp.filter);
         const rows = visibleGames.map(gm=>{
-      const color=myColorOf(gm); const opp=color==='w'?gm.black:gm.white; if(!opp) return '';
+      const color=myColorOf(gm, imp.loadedUsername || reviewUsername()); const opp=color==='w'?gm.black:gm.white; if(!opp) return '';
       const idx=imp.games.indexOf(gm);
       return `<label class="gm-row" style="cursor:default">
         <input type="checkbox" data-gm="${idx}" ${imp.selected.has(idx)?'checked':''}>
@@ -1513,11 +1513,22 @@ function renderReviewReport(){
 function renderProgress(){
   const games = Object.values(Store.state.analyzed);
   if(!games.length) return `<h1>Progress</h1><div class="card empty mt-14"><h3>Nothing to measure yet</h3><p>Analyze games in the Review tab — accuracy, blunder rate and weak openings appear here.</p></div>`;
+  const knownUsernames=[...new Set(games.map(g=>String(g.username||'').trim()).filter(Boolean))];
+  if(App.progressScope && !knownUsernames.some(u=>u.toLowerCase()===String(App.progressScope).toLowerCase())) App.progressScope='';
+  const settingsScope=String(Store.state.settings.username||'').trim();
+  const loadedScope=String(App.importState.loadedUsername||'').trim();
+  const reviewScope=App.importState.games && App.importState.usernameExplicit ? String(App.importState.username||'').trim() : '';
+  const explicitScope=String(App.progressScope||'').trim();
+  const scope=explicitScope || settingsScope || loadedScope || reviewScope || (knownUsernames.length===1?knownUsernames[0]:'');
+  const scopeBar=`<div class="card card-pad mt-14" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">${scope?`<span class="muted">Viewing ${esc(scope)}</span>`:'<span class="muted">Choose a player</span>'}${explicitScope?'<button class="btn btn-ghost btn-sm" data-act="progress-scope-clear">Use default player</button>':''}${knownUsernames.map(u=>`<button class="btn btn-ghost btn-sm" data-act="progress-scope" data-username="${esc(u)}">${esc(u)}</button>`).join('')}</div>`;
+  if(!scope && knownUsernames.length>1){
+    return `<h1 id="progress-scope-current" tabindex="-1">Progress</h1>${scopeBar}`;
+  }
   const rows = games.map(g=>{
-    const c = myColorOfHeaders(g.headers||{}, g.username || Store.state.settings.username);
+    const c = myColorOfHeaders(g.headers||{}, scope);
     return {g, sum: c && g.summary ? (g.summary[c==='w'?'white':'black'] || null) : null, date:g.date||''};
   }).filter(x=>x.sum).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
-  if(!rows.length) return `<h1>Progress</h1><div class="card empty mt-14"><h3>Not your games</h3><p>Analyzed games are missing your username in headers.</p></div>`;
+  if(!rows.length) return `<h1 id="progress-scope-current" tabindex="-1">Progress</h1>${knownUsernames.length?scopeBar:''}<div class="card empty mt-14"><h3>Not your games</h3><p>Set your chess.com username in Settings, or choose the player whose analysed games you want to measure.</p></div>`;
   const n = rows.length;
   const avg = Math.round(rows.reduce((a,x)=>a+x.sum.accuracy,0)/n);
   const bpg = rows.reduce((a,x)=>a+x.sum.blunder,0)/n;
@@ -1533,7 +1544,8 @@ function renderProgress(){
   }
   const weak = Object.values(groups).map(g=>({...g, avg:g.acc/g.n, bpg:g.b/g.n})).sort((a,b)=>a.avg-b.avg);
   const worst = weak[0];
-  return `<h1>Progress</h1><p class="muted mt-8">${n} game${n===1?'':'s'} analyzed</p>
+  const head=`<h1 id="progress-scope-current" tabindex="-1">Progress</h1>${knownUsernames.length>1?scopeBar:''}`;
+  return `${head}<p class="muted mt-8">${n} game${n===1?'':'s'} analyzed</p>
     <div class="stat-grid mt-14">
       <div class="card stat"><div class="label">Avg accuracy</div><div class="value">${avg}%</div></div>
       <div class="card stat"><div class="label">Blunders / game</div><div class="value">${bpg.toFixed(1)}</div><div class="sub">mistakes ${mpg.toFixed(1)}</div></div>
@@ -1836,13 +1848,13 @@ function handleAction(t, e){
     }
     case 'load-games': {
       const username=reviewUsername();
-      if(!username){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Enter a chess.com username first.'}; render(); break; }
-      if(Engine.offline){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Engine offline — game import is unavailable until the engine is ready.'}; render(); break; }
+      if(!username){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Enter a chess.com username first.',errorKind:'validation'}; render(); break; }
+      if(Engine.offline){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Engine offline — game import is unavailable until the engine is ready.',errorKind:'validation'}; render(); break; }
       const now=new Date();
       const requestId = ++App.importRequestId;
       if(App.importAbort) App.importAbort.abort();
       const controller = new AbortController(); App.importAbort = controller;
-      App.importState = {year:now.getFullYear(), month:now.getMonth(), username, games:null, filter:'all', selected:new Set(), loading:true, error:null, requestId};
+      App.importState = {year:now.getFullYear(), month:now.getMonth(), username, loadedUsername:username, usernameExplicit:true, games:null, filter:'all', selected:new Set(), loading:true, error:null, errorKind:null, requestId};
       render();
       Importer.month(username, App.importState.year, App.importState.month, controller.signal)
         .then(g=>{ if(App.importState.requestId!==requestId) return; App.importState.games=g; App.importState.loading=false; render(); })
@@ -1855,9 +1867,9 @@ function handleAction(t, e){
       month += act==='prev-month'?-1:1;
       if(month<0){month=11;year--;} if(month>11){month=0;year++;}
       const username=reviewUsername();
-      if(!username){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Enter a chess.com username first.'}; render(); break; }
-      if(Engine.offline){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Engine offline — game import is unavailable until the engine is ready.'}; render(); break; }
-      Object.assign(imp,{username,usernameExplicit:true,year,month,games:null,loading:true,selected:new Set(),error:null});
+      if(!username){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Enter a chess.com username first.',errorKind:'validation'}; render(); break; }
+      if(Engine.offline){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Engine offline — game import is unavailable until the engine is ready.',errorKind:'validation'}; render(); break; }
+      Object.assign(imp,{username,loadedUsername:username,usernameExplicit:true,year,month,games:null,loading:true,selected:new Set(),error:null,errorKind:null});
       const requestId=++App.importRequestId;
       if(App.importAbort) App.importAbort.abort();
       const controller=new AbortController(); App.importAbort=controller; imp.requestId=requestId;
@@ -1870,7 +1882,8 @@ function handleAction(t, e){
     case 'analyze-selected': {
       const imp=App.importState;
       const picked=[...imp.selected].map(i=>imp.games[i]).filter(Boolean);
-        if(picked.length) runAnalysis(picked, {username:reviewUsername()});
+      const owner=String(imp.loadedUsername||imp.username||'').trim() || Store.state.settings.username;
+      if(picked.length) runAnalysis(picked, {username:owner});
       break;
     }
     case 'paste-pgn': openPasteModal(); break;
@@ -1927,6 +1940,21 @@ function handleAction(t, e){
         root.querySelector('[data-x]').addEventListener('click',()=>root.querySelector('[data-close]').click());
         root.querySelector('#do-reset').addEventListener('click',()=>{ Store.reset(); close(); applyTheme(); render(); toast('All data cleared'); });
       });
+      break;
+    }
+    case 'progress-scope': {
+      const u=String(t.dataset.username||'').trim().slice(0,80);
+      App.progressScope=u;
+      render();
+      const head=document.getElementById('progress-scope-current');
+      if(head && typeof head.focus==='function'){ try{ head.focus({preventScroll:true}); }catch(e){ head.focus(); } }
+      break;
+    }
+    case 'progress-scope-clear': {
+      App.progressScope='';
+      render();
+      const head=document.getElementById('progress-scope-current');
+      if(head && typeof head.focus==='function'){ try{ head.focus({preventScroll:true}); }catch(e){ head.focus(); } }
       break;
     }
     case 'go-openings': go('openings'); break;
@@ -2189,7 +2217,8 @@ const App = {
   view:'play',
   play:null,
   builder:null,       // {chess, name, selected}
-  importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null, requestId:0, username:'', usernameExplicit:false},
+  progressScope:'',
+  importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null, requestId:0, username:'', loadedUsername:'', usernameExplicit:false},
   importRequestId:0, importAbort:null, accountRequestId:0,
   analysisRunId:0, analysisCancelled:false,
   syncState:{running:false,lastChecked:0,lastError:null,lastAdded:0},
@@ -2415,6 +2444,10 @@ function savePlayGameLocal(S){
 
 function resetBuilderForEntry(){
   App.builder = { chess:new Chess(), name:'', branches:[{id:'main',name:'Main line',moves:''}], activeBranchId:'main', selected:null, _restored:true };
+  if(Store.state.playbook){
+    Store.state.playbook=null;
+    Store.save();
+  }
   if(typeof Board !== 'undefined') Board.selected = null;
 }
 function go(view){
@@ -2430,11 +2463,25 @@ function go(view){
 }
 const RENDERERS = { play:renderPlay, openings:renderOpenings, review:renderReview, progress:renderProgress, settings:renderSettings };
 function render(){
+  const active = document.activeElement;
+  const activeId = active && active.id ? active.id : '';
+  const selection=(()=>{ try{ return activeId && typeof active.selectionStart==='number' ? {start:active.selectionStart, end:active.selectionEnd} : null; }catch(e){ return null; } })();
   document.getElementById('main').innerHTML = '<div class="view">'+RENDERERS[App.view]()+'</div>';
   bindView();
   if(App.view==='play'&&Play.session) mountPlayBoard();
   if(App.view==='openings') mountBuilderBoard();
   if(App.view==='review'&&Review.data) mountReviewBoard();
+  const modalRoot = document.getElementById('modal-root');
+  const modalOpen = !!(modalRoot && modalRoot.firstElementChild);
+  if(activeId && !modalOpen){
+    const next = document.getElementById(activeId);
+    if(next && typeof next.focus==='function'){
+      try{ next.focus({preventScroll:true}); }catch(e){ next.focus(); }
+      if(selection && typeof next.setSelectionRange==='function'){
+        try{ next.setSelectionRange(selection.start, selection.end); }catch(e){}
+      }
+    }
+  }
 }
 
 /* =================== PLAY VIEW =================== */

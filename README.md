@@ -2,7 +2,7 @@
 
 ChessLab is a local-first chess opening trainer and game-review app. It runs as a single browser application, needs no build step, and keeps your chess data in your browser.
 
-**Current release:** `v2.7.3`
+**Current release:** `v2.7.4`
 
 ---
 
@@ -180,8 +180,8 @@ ChessLab has no backend or account database. The main data is stored under the b
 - Settings
 - Saved opening lines
 - Analysed games
-- The current opening practice draft
 - Recent practice games
+- The current opening practice draft (cleared when you re-enter Openings from another tab)
 
 Optional chess.com import uses public game data over the network. ChessLab does not need an API key for the core app. Do not put passwords, tokens, or other secrets into exported JSON files or source code.
 
@@ -205,7 +205,7 @@ If the engine cannot load:
 
 ### The page looks like an older version
 
-Check the version badge in the header. If it does not show `v2.7.3`, use a hard refresh:
+Check the version badge in the header. If it does not show `v2.7.4`, use a hard refresh:
 
 - Windows: `Ctrl + Shift + R`
 - macOS: `Cmd + Shift + R`
@@ -232,6 +232,7 @@ Confirm that it is your turn. The player color, current chess turn, and visual b
 - `v2.7.1` — review rendering, mover-POV deltas, sync filtering, and branch persistence hardening
 - `v2.7.2` — correct best-line labeling without reusing played-move evaluations, render final-position alternatives, and keep branch navigation safe
 - `v2.7.3` — start Openings with a clear board on tab entry, allow Review imports for any entered chess.com username, and name the winning side and color on checkmate
+- `v2.7.4` — keep Progress statistics scoped to the account, preserve Review-only usernames with a handle picker, stamp loaded-game ownership, preserve input focus, and clear the stale practice draft on Openings entry
 
 Each release is tagged in Git so a known-good version can be recovered.
 
