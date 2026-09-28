@@ -72,7 +72,7 @@ function loadApp({ storage = {} } = {}) {
   const script = inlineScripts.join('\n');
   vm.createContext(context);
   vm.runInContext(script, context, { filename: 'index-inline.js' });
-  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, Importer, classifyPly, analyzeGame, validateState, defaultState, render, renderPlay, renderOpenings, renderReview, renderReviewReport, mountBuilderBoard, mountReviewBoard, runAnalysis, renderProgress, openModal, handleAction, myColorOfHeaders, validateAnalyzedChain, sanitizeMoves, ensureBuilderModel, activeBuilderBranch, createBuilderBranch, switchBuilderBranch, builderDiverges, syncBuilderBranch, savePlaybook, recordBuilderMove };', context);
+  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, Importer, classifyPly, analyzeGame, validateState, defaultState, render, renderPlay, renderOpenings, renderReview, renderReviewReport, mountBuilderBoard, mountReviewBoard, runAnalysis, renderProgress, openModal, handleAction, go, myColorOf, myColorOfHeaders, validateAnalyzedChain, sanitizeMoves, ensureBuilderModel, activeBuilderBranch, createBuilderBranch, switchBuilderBranch, builderDiverges, syncBuilderBranch, savePlaybook, recordBuilderMove };', context);
   return { dom, window, context, waitFor };
 }
 
@@ -151,6 +151,91 @@ test('strict state validation rejects an opening line with an unsafe id', () => 
   assert.throws(() => context.validateState({
     settings: {}, openingLines: [{ id: 'x" onclick="alert(1)', name: 'x', moves: '' }]
   }), /Invalid/i);
+});
+
+test('entering Openings from another tab starts with a clear board', () => {
+  const { context } = loadApp();
+  const { Store, App, go } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.openingLines = [{ id: 'keep', name: 'Saved line', moves: 'e4 e5', fen: null }];
+  Store.state.playbook = { name: 'Old draft', moves: 'd4', branches: [{ id: 'main', name: 'Main line', moves: 'd4' }], activeBranchId: 'main' };
+  App.builder = { chess: new Chess(), name: 'Old draft' };
+  App.builder.chess.move('d4');
+  App.view = 'review';
+  go('openings');
+  assert.equal(App.view, 'openings');
+  assert.equal(App.builder.chess.history().length, 0, 'the live board must be the fresh starting position');
+  assert.equal(App.builder.branches.length, 1);
+  assert.equal(App.builder.branches[0].moves, '', 'the entering board must not restore the old draft branch');
+  assert.equal(App.builder.name, '');
+  assert.equal(Store.state.openingLines.length, 1, 'saved lines must remain available');
+  const movesText = context.document.querySelector('.moves-grid').textContent;
+  assert.match(movesText, /Play moves on the board/i);
+});
+
+test('review username input controls the chess.com account used for imports', async () => {
+  const { context } = loadApp();
+  const { Store, App, render, handleAction, myColorOf } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'ConfiguredUser';
+  const seen = [];
+  const original = context.__test.Importer.month;
+  context.__test.Importer.month = async (username, year, month, signal) => { seen.push(username); return []; };
+  App.view = 'review';
+  render();
+  const input = context.document.querySelector('#review-username');
+  assert.ok(input, 'Review must expose a username field');
+  input.value = 'OtherPlayer';
+  input.dispatchEvent(new context.window.Event('input', { bubbles: true }));
+  await handleAction({ dataset: { act: 'load-games' } });
+  assert.deepEqual(seen, ['OtherPlayer']);
+  assert.equal(Store.state.settings.username, 'ConfiguredUser', 'review import must not overwrite the saved account');
+  assert.equal(myColorOf({ white: { username: 'OtherPlayer' }, black: { username: 'SomeoneElse' } }), 'w');
+  context.__test.Importer.month = original;
+});
+
+test('review username is applied to the loaded month and month navigation', async () => {
+  const { context } = loadApp();
+  const { Store, App, render, handleAction } = context.__test;
+  Store.state = context.defaultState();
+  Store.state.settings.username = 'SavedUser';
+  const seen = [];
+  const original = context.__test.Importer.month;
+  context.__test.Importer.month = async (username, year, month) => { seen.push(username); return []; };
+  App.view = 'review';
+  render();
+  const input = context.document.querySelector('#review-username');
+  input.value = 'FetchedUser';
+  input.dispatchEvent(new context.window.Event('input', { bubbles: true }));
+  await handleAction({ dataset: { act: 'load-games' } });
+  await handleAction({ dataset: { act: 'next-month' } });
+  assert.ok(seen.length >= 2);
+  assert.ok(seen.every(u => u === 'FetchedUser'), 'month navigation must keep the entered review username');
+  context.__test.Importer.month = original;
+});
+
+test('review import rejects a blank username without calling chess.com', async () => {
+  const { context } = loadApp();
+  const { Store, App, render, handleAction } = context.__test;
+  Store.state = context.defaultState();
+  let calls = 0;
+  const original = context.__test.Importer.month;
+  context.__test.Importer.month = async () => { calls++; return []; };
+  App.view = 'review';
+  render();
+  const input = context.document.querySelector('#review-username');
+  input.value = '   ';
+  input.dispatchEvent(new context.window.Event('input', { bubbles: true }));
+  await handleAction({ dataset: { act: 'load-games' } });
+  assert.equal(calls, 0);
+  assert.match(context.document.querySelector('#main').textContent, /enter a chess\.com username/i);
+  context.__test.Importer.month = original;
+});
+
+test('Store migration preserves a blank username instead of restoring a hardcoded account', () => {
+  const { context } = loadApp();
+  const state = context.validateState({ settings: { username: '   ' } }, { strict: false });
+  assert.equal(state.settings.username, '');
 });
 
 test('Openings shows the sides derived from the last line move and saved-line practice uses them', () => {
@@ -518,6 +603,35 @@ test('classifyPly detects a materially exposed played move versus the engine lin
   const c = classifyPly({ fenBefore: fen, uci: 'h1h5' }, { best: 'h1h5', bestCpWhite: 20, secondCpWhite: -120 }, { bestCpWhite: 18, secondCpWhite: -120 }, 'w', 3);
   assert.ok(c.sacPawns >= 9);
   assert.equal(c.cls, 'brilliant');
+});
+
+test('checkmate names the winning side and color in the play result', () => {
+  const { context } = loadApp();
+  const { Store, Play, Engine, render } = context.__test;
+  const originalPlayMove = Engine.playMove;
+  Engine.playMove = () => new Promise(() => {});
+  Store.state = context.defaultState();
+
+  // The side to move is checkmated: White's Ra8# mates Black.
+  const checkmatedBlack = 'R5k1/5ppp/8/8/8/8/8/6K1 b - - 1 2';
+  Play.start({ color: 'w', skill: 1, lineMoves: '' });
+  Play.session.chess = new Chess(checkmatedBlack);
+  assert.equal(Play.session.chess.in_checkmate(), true, 'fixture must be a real checkmate');
+  Play.checkEnd(Play.session);
+  render();
+  assert.match(context.document.querySelector('#play-done-text').textContent, /You \(White\) won by checkmate/i);
+  assert.match(context.document.querySelector('#play-status').textContent, /You \(White\) won by checkmate/i);
+
+  // The same mate is an engine win when the user owns the mated side.
+  Play.start({ color: 'b', skill: 1, lineMoves: '' });
+  Play.session.chess = new Chess(checkmatedBlack);
+  Play.checkEnd(Play.session);
+  render();
+  assert.match(context.document.querySelector('#play-done-text').textContent, /Stockfish \(White\) won by checkmate/i);
+  assert.match(context.document.querySelector('#play-status').textContent, /Stockfish \(White\) won by checkmate/i);
+
+  Play.cancel();
+  Engine.playMove = originalPlayMove;
 });
 
 test('play undo rolls back the last ply and resign disappears after the game ends', () => {

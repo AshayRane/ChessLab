@@ -219,7 +219,7 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.2</span>
+<span class="ver-badge" title="ChessLab version">v2.7.3</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -279,7 +279,7 @@ function openModal(title, bodyHTML, onMount){
 
 /* Store — same localStorage key as v1 so analyzed games/settings survive the upgrade */
 const STORAGE_VERSION = 3;
-const DEFAULT_SETTINGS = { username:'IM_AshayRane', reviewMovetime:700, theme:'light', skill:8, color:'w', showEvalInReview:true, boardFlipped:false, autoSyncChessCom:true };
+const DEFAULT_SETTINGS = { username:'', reviewMovetime:700, theme:'light', skill:8, color:'w', showEvalInReview:true, boardFlipped:false, autoSyncChessCom:true };
 const SAFE_ID = /^[A-Za-z0-9_-]{1,96}$/;
 const SAFE_UCI = /^[a-h][1-8][a-h][1-8][qrbn]?$/i;
 const UNSAFE_OBJECT_KEYS = new Set(['__proto__','prototype','constructor','toString','valueOf','hasOwnProperty','isPrototypeOf','propertyIsEnumerable','toLocaleString']);
@@ -390,7 +390,8 @@ function normalizeRecord(raw, key, strict){
   const headers = {};
   if(isRecord(raw.headers)) for(const h of ['White','Black','WhiteElo','BlackElo','Result','ECO','Date','TimeControl','Termination','Link']) if(raw.headers[h] != null) headers[h] = safeString(raw.headers[h], 200);
   const summary = normalizeSummary(raw.summary);
-  return { key: safeRecordKey(key || raw.key, 'record'), url: typeof raw.url === 'string' ? safeString(raw.url, 1000) : null, pgn, date: safeString(raw.date, 40), headers, plies, summary, movetime: boundedInt(raw.movetime, 100, 10000, 700) };
+  if(strict && raw.username != null && typeof raw.username !== 'string') throw new Error('Invalid analysis username');
+  return { key: safeRecordKey(key || raw.key, 'record'), url: typeof raw.url === 'string' ? safeString(raw.url, 1000) : null, username: safeString(raw.username, 80).trim(), pgn, date: safeString(raw.date, 40), headers, plies, summary, movetime: boundedInt(raw.movetime, 100, 10000, 700) };
 }
 function validateState(raw, {strict=true}={}){
   if(!isRecord(raw)) throw new Error('Invalid application state');
@@ -400,7 +401,7 @@ function validateState(raw, {strict=true}={}){
   const theme = ['light','dark','system'].includes(inputSettings.theme) ? inputSettings.theme : DEFAULT_SETTINGS.theme;
   const username = safeString(inputSettings.username, 80).trim();
   out.settings = {
-    username: username || DEFAULT_SETTINGS.username,
+    username: username,
     reviewMovetime: boundedInt(inputSettings.reviewMovetime, 200, 5000, DEFAULT_SETTINGS.reviewMovetime),
     theme, skill: boundedInt(inputSettings.skill, 0, 20, DEFAULT_SETTINGS.skill),
     color: inputSettings.color === 'b' ? 'b' : 'w', showEvalInReview: inputSettings.showEvalInReview !== false,
@@ -1351,7 +1352,7 @@ function renderReview(){
   const imp = App.importState;
   let list='';
   if(imp.loading) list = '<div class="card card-pad muted">Loading your games...</div>';
-  else if(imp.error) list = `<div class="banner warn">Could not load games: ${esc(imp.error)} — paste PGN still works.</div>`;
+      else if(imp.error) list = `<div class="banner warn">${esc(imp.error)}${imp.error.includes('username')?' — paste PGN still works.':''}</div>`;
   else if(imp.games){
         const games = Array.isArray(imp.games)?imp.games:[];
         const visibleGames = games.filter(gm=>imp.filter==='all'||gm.time_class===imp.filter);
@@ -1385,8 +1386,12 @@ function renderReview(){
   const analyzed = Object.values(Store.state.analyzed).sort((a,b)=>String(b.date).localeCompare(String(a.date)));
   return `<h1>Game Review</h1>
     <p class="muted mt-8">Click a piece and destination to test a different move. ChessLab analyzes that continuation and shows the evaluation change; right-drag the board to draw your own arrows.</p>
+    <div class="card card-pad mt-14">
+      <div class="field"><label for="review-username">chess.com username</label><input class="input" id="review-username" value="${esc(reviewUsername())}" placeholder="Enter a chess.com username" autocomplete="username"></div>
+      <div class="small muted">Enter any username to fetch that player's games. This does not change your saved account.</div>
+    </div>
     <div class="row mt-14" style="display:flex;gap:8px;flex-wrap:wrap">
-      <button class="btn btn-green" data-act="load-games" ${Engine.ready?'':'disabled'}>Load my chess.com games</button>
+      <button class="btn btn-green" data-act="load-games">Load chess.com games</button>
       <button class="btn btn-ghost" data-act="paste-pgn">Paste PGN</button>
     </div>
     ${Engine.offline?'<div class="banner warn mt-14">Engine offline — paste-PGN analysis unavailable. Openings practice still works.</div>':''}
@@ -1399,14 +1404,20 @@ function renderReview(){
       </div>`).join('')}</div>`:''}`;
 }
 const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-function myColorOf(gm){
-  const u = Store.state.settings.username.toLowerCase();
+function reviewUsername(){
+  const value = App.importState.usernameExplicit ? App.importState.username : (App.importState.username || Store.state.settings.username || '');
+  return String(value || '').trim().slice(0,80);
+}
+function myColorOf(gm, username=reviewUsername()){
+  const u = String(username || '').trim().toLowerCase();
+  if(!u) return null;
   if(gm?.white && typeof gm.white.username==='string' && gm.white.username.toLowerCase()===u) return 'w';
   if(gm?.black && typeof gm.black.username==='string' && gm.black.username.toLowerCase()===u) return 'b';
   return null;
 }
-function myColorOfHeaders(h){
-  const u = Store.state.settings.username.toLowerCase();
+function myColorOfHeaders(h, username=Store.state.settings.username){
+  const u = String(username || '').trim().toLowerCase();
+  if(!u) return null;
   const white=String(h?.White||'').toLowerCase(), black=String(h?.Black||'').toLowerCase();
   if(white===u) return 'w';
   if(black===u) return 'b';
@@ -1426,7 +1437,7 @@ function renderReviewReport(){
   const ev = branchActive ? (branchMove && branchMove.evalAfter || null) : (nextPly ? nextPly.evalBefore : (curPly && curPly.evalAfter) || (R.plys[R.plys.length-1] ? R.plys[R.plys.length-1].evalAfter : null));
   const wp = ev && isEval(ev) ? wpWhiteOf({bestCpWhite:ev.bestCpWhite, bestMateWhite:ev.bestMateWhite}) : 50;
   const showEval = Store.state.settings.showEvalInReview !== false;
-  const myColor = myColorOfHeaders(R.headers||{});
+  const myColor = myColorOfHeaders(R.headers||{}, R.data?.username || Store.state.settings.username);
   const h = R.headers||{};
   const CLS_LABEL = {brilliant:'Brilliant',great:'Great',best:'Best',excellent:'Excellent',good:'Good',book:'Book',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',q:'?'};
   let detail = '<p class="small muted">Start position — use arrows or click a move.</p>';
@@ -1503,7 +1514,7 @@ function renderProgress(){
   const games = Object.values(Store.state.analyzed);
   if(!games.length) return `<h1>Progress</h1><div class="card empty mt-14"><h3>Nothing to measure yet</h3><p>Analyze games in the Review tab — accuracy, blunder rate and weak openings appear here.</p></div>`;
   const rows = games.map(g=>{
-    const c = myColorOfHeaders(g.headers||{});
+    const c = myColorOfHeaders(g.headers||{}, g.username || Store.state.settings.username);
     return {g, sum: c && g.summary ? (g.summary[c==='w'?'white':'black'] || null) : null, date:g.date||''};
   }).filter(x=>x.sum).sort((a,b)=>String(a.date).localeCompare(String(b.date)));
   if(!rows.length) return `<h1>Progress</h1><div class="card empty mt-14"><h3>Not your games</h3><p>Analyzed games are missing your username in headers.</p></div>`;
@@ -1663,7 +1674,7 @@ function mountReviewBoard(){
   const branchEnd = Review.branch ? Review.branch.basePly + Review.branch.moves.length : -1;
   const ply = Review.branch && Review.nav>=Review.branch.basePly && Review.nav<=branchEnd ? Review.nav : Math.min(Review.nav, Review.hist.length);
   const {g} = Review.boardAt(ply);
-  const myColor = myColorOfHeaders(Review.headers||{});
+  const myColor = myColorOfHeaders(Review.headers||{}, Review.data?.username || Store.state.settings.username);
   Board.init(el, g, { color: Review.flipped ? (myColor==='b'?'w':'b') : (myColor||'w'), interactive:true });
   Board.onSquare = null;
   Board._onSquare = function(sq){
@@ -1692,6 +1703,7 @@ function mountReviewBoard(){
 function refreshAccountChip(){
   const chip = $('#chip-account'); if(!chip) return;
   const username=Store.state.settings.username;
+  if(!username){ const empty=$('#chip-account'); if(empty) empty.textContent='No chess.com account'; return; }
   const requestId=++App.accountRequestId;
   chip.textContent = username;
   Importer.stats(username).then(j=>{
@@ -1737,6 +1749,7 @@ function bindView(){
   view.addEventListener('input', e=>{
     const t=e.target;
     if(t.id==='bb-name'){ if(App.builder) App.builder.name = t.value; savePlaybook(); }
+    if(t.id==='review-username'){ App.importState.username = t.value; App.importState.usernameExplicit = true; }
     if(t.id==='s-mt'){ $('#s-mt-lab').textContent = t.value+' ms'; Store.state.settings.reviewMovetime=+t.value; Store.save(); }
     if(t.id==='s-skill'){ Store.state.settings.skill=+t.value; Store.save(); }
     if(t.id==='pf-skill'){ const lab=$('#pf-skill-lab'); if(lab) lab.textContent=skillLabel(+t.value); }
@@ -1822,15 +1835,18 @@ function handleAction(t, e){
       break;
     }
     case 'load-games': {
+      const username=reviewUsername();
+      if(!username){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Enter a chess.com username first.'}; render(); break; }
+      if(Engine.offline){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Engine offline — game import is unavailable until the engine is ready.'}; render(); break; }
       const now=new Date();
       const requestId = ++App.importRequestId;
-    if(App.importAbort) App.importAbort.abort();
-    const controller = new AbortController(); App.importAbort = controller;
-    App.importState = {year:now.getFullYear(), month:now.getMonth(), games:null, filter:'all', selected:new Set(), loading:true, error:null, requestId};
-    render();
-    Importer.month(Store.state.settings.username, App.importState.year, App.importState.month, controller.signal)
-      .then(g=>{ if(App.importState.requestId!==requestId) return; App.importState.games=g; App.importState.loading=false; render(); })
-      .catch(err=>{ if(err.name==='AbortError' || App.importState.requestId!==requestId) return; App.importState.loading=false; App.importState.error=err.message||String(err); render(); });
+      if(App.importAbort) App.importAbort.abort();
+      const controller = new AbortController(); App.importAbort = controller;
+      App.importState = {year:now.getFullYear(), month:now.getMonth(), username, games:null, filter:'all', selected:new Set(), loading:true, error:null, requestId};
+      render();
+      Importer.month(username, App.importState.year, App.importState.month, controller.signal)
+        .then(g=>{ if(App.importState.requestId!==requestId) return; App.importState.games=g; App.importState.loading=false; render(); })
+        .catch(err=>{ if(err.name==='AbortError' || App.importState.requestId!==requestId) return; App.importState.loading=false; App.importState.error=err.message||String(err); render(); });
       break;
     }
     case 'prev-month': case 'next-month': {
@@ -1838,12 +1854,15 @@ function handleAction(t, e){
       let {year,month}=imp;
       month += act==='prev-month'?-1:1;
       if(month<0){month=11;year--;} if(month>11){month=0;year++;}
-      Object.assign(imp,{year,month,games:null,loading:true,selected:new Set(),error:null});
+      const username=reviewUsername();
+      if(!username){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Enter a chess.com username first.'}; render(); break; }
+      if(Engine.offline){ App.importState={...App.importState,username,usernameExplicit:true,loading:false,games:null,error:'Engine offline — game import is unavailable until the engine is ready.'}; render(); break; }
+      Object.assign(imp,{username,usernameExplicit:true,year,month,games:null,loading:true,selected:new Set(),error:null});
       const requestId=++App.importRequestId;
       if(App.importAbort) App.importAbort.abort();
       const controller=new AbortController(); App.importAbort=controller; imp.requestId=requestId;
       render();
-      Importer.month(Store.state.settings.username, year, month, controller.signal)
+      Importer.month(username, year, month, controller.signal)
         .then(g=>{ if(imp.requestId!==requestId) return; imp.games=g; imp.loading=false; render(); })
         .catch(err=>{ if(err.name==='AbortError' || imp.requestId!==requestId) return; imp.loading=false; imp.error=err.message||String(err); render(); });
       break;
@@ -1851,7 +1870,7 @@ function handleAction(t, e){
     case 'analyze-selected': {
       const imp=App.importState;
       const picked=[...imp.selected].map(i=>imp.games[i]).filter(Boolean);
-      if(picked.length) runAnalysis(picked, {});
+        if(picked.length) runAnalysis(picked, {username:reviewUsername()});
       break;
     }
     case 'paste-pgn': openPasteModal(); break;
@@ -1927,7 +1946,7 @@ function openPasteModal(){
 }
 
 /* =================== ANALYSIS RUNNER =================== */
-async function runAnalysis(list, {jumpTo=false, background=false}={}){
+async function runAnalysis(list, {jumpTo=false, background=false, username=''}={}){
   if(!Engine.ready){ if(!background) toast('Engine not ready yet','err'); return 0; }
   if(background && App.analyzing) return 0;
   const runId = ++App.analysisRunId;
@@ -1960,7 +1979,7 @@ async function runAnalysis(list, {jumpTo=false, background=false}={}){
         const lbl=document.querySelector('#ana-count'); if(lbl) lbl.textContent='position '+d+'/'+tot; },
         isCancelled:()=>!currentRun(),
       });
-      const normalized = validateState({settings:Store.state.settings, analyzed:{[key]:{ key, url:rawKey||null, pgn:gm.pgn,
+      const normalized = validateState({settings:Store.state.settings, analyzed:{[key]:{ key, url:rawKey||null, username, pgn:gm.pgn,
                 date, headers:res.headers, plies:res.plies, summary:res.summary, movetime:mt }}}, {strict:true}).analyzed[key];
       if(!currentRun()) return 0;
       if(!normalized) throw new Error('Analysis record failed validation');
@@ -2170,7 +2189,7 @@ const App = {
   view:'play',
   play:null,
   builder:null,       // {chess, name, selected}
-  importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null, requestId:0},
+  importState:{year:null, month:null, games:null, filter:'all', selected:new Set(), loading:false, error:null, requestId:0, username:'', usernameExplicit:false},
   importRequestId:0, importAbort:null, accountRequestId:0,
   analysisRunId:0, analysisCancelled:false,
   syncState:{running:false,lastChecked:0,lastError:null,lastAdded:0},
@@ -2394,8 +2413,13 @@ function savePlayGameLocal(S){
   Store.save();
 }
 
+function resetBuilderForEntry(){
+  App.builder = { chess:new Chess(), name:'', branches:[{id:'main',name:'Main line',moves:''}], activeBranchId:'main', selected:null, _restored:true };
+  if(typeof Board !== 'undefined') Board.selected = null;
+}
 function go(view){
   if(!VIEWS.some(v=>v.id===view)) view='play';
+  if(view==='openings' && App.view!=='openings') resetBuilderForEntry();
   App.view = view;
   document.querySelectorAll('#tabs button').forEach(b=>{
     if(b.dataset.view===view) b.setAttribute('aria-current','page');
@@ -2455,17 +2479,25 @@ function renderPlay(){
     '</div>'+
     '</div></div>';
 }
+function playOutcomeText(S){
+  if(!S || !S.finished) return '';
+  if(S.result==='draw') return 'Game drawn' + (S.termination && S.termination!=='draw' ? ' by '+S.termination : '');
+  const winnerIsUser = S.result==='win';
+  const winnerColor = winnerIsUser ? S.color : S.engineColor;
+  const winnerName = winnerIsUser ? 'You' : 'Stockfish';
+  return winnerName+' ('+(winnerColor==='w'?'White':'Black')+') won by '+(S.termination||'normal');
+}
 function updatePlayPanels(){
   const S=Play.session; if(!S) return;
   const box=document.getElementById('play-moves');
   if(box) box.innerHTML = movesGridHTML(S.chess.history({verbose:true}), []);
   const st=document.getElementById('play-status');
-  if(st) st.textContent = S.finished? (S.result==='win'?'You won':S.result==='draw'?'Draw':'Engine won') : (Play._thinking?'Engine is thinking...':'Your move');
+  if(st) st.textContent = S.finished ? playOutcomeText(S) : (Play._thinking?'Engine is thinking...':'Your move');
   const done=document.getElementById('play-done');
     if(done){
       done.style.display = S.finished?'':'none';
       if(S.finished){
-        document.getElementById('play-done-text').textContent = S.result==='win'?'You won!':S.result==='draw'?'Game drawn':'Engine won';
+        document.getElementById('play-done-text').textContent = playOutcomeText(S);
         document.querySelectorAll('[data-act="undo-play"],[data-act="end-play"]').forEach(b=>b.remove());
       }
     }

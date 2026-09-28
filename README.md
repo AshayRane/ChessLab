@@ -2,7 +2,7 @@
 
 ChessLab is a local-first chess opening trainer and game-review app. It runs as a single browser application, needs no build step, and keeps your chess data in your browser.
 
-**Current release:** `v2.7.2`
+**Current release:** `v2.7.3`
 
 ---
 
@@ -10,7 +10,7 @@ ChessLab is a local-first chess opening trainer and game-review app. It runs as 
 
 - **Play** — play a game against Stockfish with a chosen color and skill level, undo a move or a full turn, and resign when needed.
 - **Openings** — build a line by playing moves for both sides, create and switch independent branches, save lines, and practise from any branch.
-- **Review** — import or paste a PGN, analyse it, step through evaluations and classifications, try a different move at any position, and draw board arrows.
+- **Review** — import games for any chess.com username or paste a PGN, analyse it, step through evaluations and classifications, try a different move at any position, and draw board arrows.
 - **Progress** — see summaries of analysed games and saved practice records.
 - **Settings** — change the theme, username, review depth, engine strength, automatic chess.com checking, and data.
 
@@ -80,7 +80,7 @@ This makes the line itself the source of truth instead of requiring a separate c
 
 ### 3. Review a game
 
-Use **Review** to load games from a public chess.com account or paste a PGN. Analysis requires the Stockfish engine to be available.
+Use **Review** to enter any public chess.com username and load that player's games for the current month, or paste a PGN. The review username is separate from the account saved in Settings, so you can inspect another player's games without changing automatic sync. Analysis requires the Stockfish engine to be available.
 
 In an analysed game, select a position and try a different legal move. ChessLab analyses the alternative position and shows the evaluation before and after. Right-drag on the board to draw yellow arrows; use the eraser button to clear them.
 
@@ -205,7 +205,7 @@ If the engine cannot load:
 
 ### The page looks like an older version
 
-Check the version badge in the header. If it does not show `v2.7.2`, use a hard refresh:
+Check the version badge in the header. If it does not show `v2.7.3`, use a hard refresh:
 
 - Windows: `Ctrl + Shift + R`
 - macOS: `Cmd + Shift + R`
@@ -231,6 +231,7 @@ Confirm that it is your turn. The player color, current chess turn, and visual b
 - `v2.7.0` — chess.com finished-game sync, opening branches, Play undo, review alternatives with evaluation deltas, user board arrows, and post-game Resign cleanup
 - `v2.7.1` — review rendering, mover-POV deltas, sync filtering, and branch persistence hardening
 - `v2.7.2` — correct best-line labeling without reusing played-move evaluations, render final-position alternatives, and keep branch navigation safe
+- `v2.7.3` — start Openings with a clear board on tab entry, allow Review imports for any entered chess.com username, and name the winning side and color on checkmate
 
 Each release is tagged in Git so a known-good version can be recovered.
 
