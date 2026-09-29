@@ -177,6 +177,16 @@ html[data-theme="dark"] .cls-ink-inaccuracy{color:#fdba74}
 html[data-theme="dark"] .cls-ink-mistake{color:#fca5a5}
 html[data-theme="dark"] .cls-ink-blunder{color:#fecaca}
 html[data-theme="dark"] .cls-ink-q{color:#b0b8c4}
+.mv-badge{
+  position:absolute;width:26%;height:26%;
+  display:flex;align-items:center;justify-content:center;
+  border-radius:50%;pointer-events:none;
+  font-size:calc(var(--bw)/13);line-height:1;font-weight:700;
+  color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.45);
+  box-shadow:0 0 0 1.5px rgba(255,255,255,.85),0 1px 3px rgba(0,0,0,.4);
+  font-family:"Segoe UI Symbol","Apple Symbols",system-ui,sans-serif;
+  overflow:hidden
+}
 .cls-brilliant{background:#0f766e}.cls-great{background:#15803d}.cls-best{background:#4d7c0f}
 .cls-excellent{background:#a16207}.cls-good{background:#b45309}.cls-book{background:#6d28d9}
 .cls-inaccuracy{background:#c2410c}.cls-mistake{background:#b91c1c}.cls-blunder{background:#991b1b}
@@ -245,7 +255,7 @@ html[data-theme="dark"] .cls-q{background:#9ca3af}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.5</span>
+<span class="ver-badge" title="ChessLab version">v2.7.6</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -825,6 +835,7 @@ function materialRiskAfter(fen, uci, mover){
   }catch(e){ return 0; }
 }
 const CLS_ICON = {brilliant:'★',great:'!!',best:'!',excellent:'✓',good:'○',book:'≡',inaccuracy:'?!',mistake:'?',blunder:'✕',q:'·'};
+const CLS_LABEL = {brilliant:'Brilliant',great:'Great',best:'Best',excellent:'Excellent',good:'Good',book:'Book',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',q:'?'};
 /* A move is "as good as the engine's top choice" when the win probability it
    gives up is within the noise floor of the search. Without this tolerance any
    move the engine happened not to rank first was mislabelled Excellent. */
@@ -1046,7 +1057,7 @@ const Board = {
   selected:null,
   focusSquare:null,
   interactive:false, onUserMove:null, color:'w',
-  lastMove:null, bestMove:null, arrows:[],
+  lastMove:null, bestMove:null, arrows:[], cls:null,
   init(el, chess, {color='w', interactive=false}={}){
     el.setAttribute('role','grid'); el.setAttribute('aria-label','Chess board'); el.setAttribute('aria-rowcount','8'); el.setAttribute('aria-colcount','8'); el.setAttribute('tabindex','0');
     const sameEl = this.el === el;
@@ -1083,6 +1094,11 @@ const Board = {
     if(opts.lastMove!==undefined) this.lastMove = opts.lastMove;
     if(opts.bestMove!==undefined) this.bestMove = opts.bestMove;
     if(opts.clearBest) this.bestMove = null;
+    // The badge class is per-move state, not a view preference: any render
+    // that does not name a class drops it. Without this a Review badge would
+    // stay stuck on the board after switching to Play or Openings, because
+    // Board is a single shared instance.
+    this.cls = (opts.cls !== undefined) ? opts.cls : null;
     this._syncPieces();
     this._renderOverlays();
   },
@@ -1186,10 +1202,36 @@ const Board = {
     }
     let html = '';
     this.el.querySelectorAll('.sq').forEach(sqEl=>sqEl.removeAttribute('aria-selected'));
+    // The badge needs its own layer ABOVE the pieces (z-index 10). The shared
+    // overlay sits at 6, so a badge drawn there would be hidden behind the very
+    // piece it is marking. Arrows are at 20, so the badge stays under them.
+    let badgeLayer = this.el.querySelector('.badge-layer');
+    if(!badgeLayer){
+      badgeLayer = document.createElement('div');
+      badgeLayer.className = 'badge-layer';
+      badgeLayer.style.cssText = 'position:absolute;inset:0;z-index:15;pointer-events:none;';
+      this.el.appendChild(badgeLayer);
+    }
+    let badgeHtml = '';
     if(this.lastMove){
       for(const sq of [this.lastMove.from, this.lastMove.to]){
         const {x,y} = this._xy(sq);
         html += `<div class="hl" style="left:${x*12.5}%;top:${y*12.5}%;width:12.5%;height:12.5%"></div>`;
+      }
+      // Quality badge on the square the piece landed on, so the piece that
+      // was actually played carries its own mark. Only the destination is
+      // badged: the origin square is where the piece used to be.
+      const cls = CLS_ICON[this.cls] !== undefined ? this.cls : null;
+      if(cls){
+        const {x,y} = this._xy(this.lastMove.to);
+        const label = CLS_LABEL[cls] || '';
+        // aria-hidden: the board is role="grid" and expects only row/gridcell
+        // children, so a role="img" here is an invalid child -- and the same
+        // quality is already named on the move button and the detail badge, so
+        // announcing it twice would just be noise. The glyph is decorative;
+        // `title` still names it for the mouse.
+        badgeHtml += `<span class="mv-badge cls-${cls}" style="left:${x*12.5+1.2}%;top:${y*12.5+0.8}%"`
+             + ` title="${esc(label)}" aria-hidden="true">${esc(CLS_ICON[cls])}</span>`;
       }
     }
     if(this.selected){
@@ -1218,6 +1260,7 @@ const Board = {
       }
     }
     layer.innerHTML = html;
+    badgeLayer.innerHTML = badgeHtml;
     // best-move arrow layer
     let al = this.el.querySelector('.arrow-layer');
     if(!al){ al = document.createElementNS('http://www.w3.org/2000/svg','svg'); al.setAttribute('class','arrow-layer'); this.el.appendChild(al); }
@@ -1580,7 +1623,6 @@ function renderReviewReport(){
   const showEval = Store.state.settings.showEvalInReview !== false;
   const myColor = myColorOfHeaders(R.headers||{}, R.data?.username || Store.state.settings.username);
   const h = R.headers||{};
-  const CLS_LABEL = {brilliant:'Brilliant',great:'Great',best:'Best',excellent:'Excellent',good:'Good',book:'Book',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',q:'?'};
   let detail = '<p class="small muted">Start position — use arrows or click a move.</p>';
   if(branchActive){
     const bdelta = (branchMove.wpBefore!=null && branchMove.wpAfter!=null) ? Math.round(branchMove.wpAfter-branchMove.wpBefore) : null;
@@ -1842,11 +1884,27 @@ function mountReviewBoard(){
     Board.selected=own?sq:null;
     Board.render();
   };
+  // The badge belongs to the move that was PLAYED, which is ply-1 in the
+  // current position -- not the next move waiting to be made. At ply 0 there
+  // is no played move and nothing is badged.
+  const playedUci = ply>0
+    ? (Review.branch && ply>Review.branch.basePly
+        ? Review.branch.moves[ply-Review.branch.basePly-1]
+        : (Review.hist[ply-1] ? Review.hist[ply-1].uci : null))
+    : null;
+  const playedPly = ply>0 ? Review.plys[ply-1] : null;
   const nextPly = Review.plys[ply];
   const branchUci = Review.branch && ply>Review.branch.basePly ? Review.branch.moves[ply-Review.branch.basePly-1] : null;
-  if(branchUci) Board.render({ bestMove: {from:branchUci.slice(0,2), to:branchUci.slice(2,4)} });
-  else if(nextPly && nextPly.bestUci) Board.render({ bestMove: {from:nextPly.bestUci.slice(0,2), to:nextPly.bestUci.slice(2,4)} });
-  else Board.render({clearBest:true});
+  const shownCls = (playedPly && CLS_ICON[playedPly.cls] !== undefined) ? playedPly.cls : null;
+  if(playedUci){
+    const opts = { lastMove:{ from:playedUci.slice(0,2), to:playedUci.slice(2,4) }, cls: shownCls };
+    if(branchUci) opts.bestMove = {from:branchUci.slice(0,2), to:branchUci.slice(2,4)};
+    else if(nextPly && nextPly.bestUci) opts.bestMove = {from:nextPly.bestUci.slice(0,2), to:nextPly.bestUci.slice(2,4)};
+    else opts.clearBest = true;
+    Board.render(opts);
+  }else{
+    Board.render({ lastMove:null, cls:null, clearBest:true });
+  }
 }
 
 /* =================== VIEW BINDING =================== */

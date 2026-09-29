@@ -2,7 +2,7 @@
 
 ChessLab is a local-first chess opening trainer and game-review app. It runs as a single browser application, needs no build step, and keeps your chess data in your browser.
 
-**Current release:** `v2.7.5`
+**Current release:** `v2.7.6`
 
 ---
 
@@ -205,7 +205,7 @@ If the engine cannot load:
 
 ### The page looks like an older version
 
-Check the version badge in the header. If it does not show `v2.7.5`, use a hard refresh:
+Check the version badge in the header. If it does not show `v2.7.6`, use a hard refresh:
 
 - Windows: `Ctrl + Shift + R`
 - macOS: `Cmd + Shift + R`
@@ -233,6 +233,7 @@ Confirm that it is your turn. The player color, current chess turn, and visual b
 - `v2.7.2` — correct best-line labeling without reusing played-move evaluations, render final-position alternatives, and keep branch navigation safe
 - `v2.7.3` — start Openings with a clear board on tab entry, allow Review imports for any entered chess.com username, and name the winning side and color on checkmate
 - `v2.7.4` — keep Progress statistics scoped to the account, preserve Review-only usernames with a handle picker, stamp loaded-game ownership, preserve input focus, and clear the stale practice draft on Openings entry
+- `v2.7.6` — show the move-quality badge on the board, on the piece that was played
 - `v2.7.5` — give every move class its own colour and icon, fix Best/Excellent/Book classification, and measure sacrifices as net material
 
 Each release is tagged in Git so a known-good version can be recovered.

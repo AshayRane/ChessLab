@@ -279,6 +279,169 @@ test('a recapture that trades up still leaves material at risk', () => {
   assert.equal(c.sacPawns, 8, 'a pawn recapture does not cancel a lost queen');
 });
 
+test('the board shows the quality badge on the piece that just moved', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  for (const san of ['e4', 'e5', 'Nf3']) g.move(san);
+  Board.init(el, g, { interactive: false });
+  // Black's Nf3 is the last move: the piece sits on f3 and must be badged.
+  // f3 is file 5, rank 3 -> x=5, y=5 -> 62.5% + 1.2% inset.
+  Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: 'brilliant' });
+  const badge = el.querySelector('.mv-badge');
+  assert.ok(badge, 'a quality badge must be rendered on the board');
+  const style = badge.getAttribute('style') || '';
+  assert.match(style, /left:63\.7%/, 'f-file is column 5: 62.5% + 1.2% inset');
+  assert.match(style, /top:63\.3%/, 'rank 3 is row 5: 62.5% + 0.8% inset');
+  assert.match(badge.className, /cls-brilliant/, 'badge carries the move class');
+  assert.equal(badge.textContent, '★', 'badge shows the class icon');
+  // Decorative: the board is a grid, and the move list already names the class.
+  assert.equal(badge.getAttribute('aria-hidden'), 'true', 'the board badge is decorative, not announced');
+  assert.equal(badge.getAttribute('title'), 'Brilliant', 'title names the class for the mouse');
+  // No last move, no badge.
+  Board.render({ lastMove: null, cls: null });
+  assert.equal(el.querySelector('.mv-badge'), null, 'no badge without a last move');
+  // A move with no class (or an unrecognised one) must not emit a badge at
+  // all: a stray unstyled marker on the square is worse than no marker.
+  Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: 'not-a-class' });
+  assert.equal(el.querySelector('.mv-badge'), null, 'an unknown class renders no badge');
+  Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: 'q' });
+  const neutral = el.querySelector('.mv-badge');
+  assert.equal(neutral.textContent, '·', 'the neutral class shows the neutral icon');
+  assert.match(neutral.className, /cls-q/, 'the neutral class keeps its own style');
+});
+
+test('the board badge follows the last move for a black move on a flipped board', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  g.move('e4'); g.move('e5');
+  // Black played e5. Seen from Black's side the e-file is column 3 and rank 5
+  // is row 4 -> 37.5% + 1.2% and 50% + 0.8%. A white-view board would put
+  // these at 51.2% and 38.8%, so these numbers prove the flip is honoured.
+  Board.init(el, g, { color: 'b', interactive: false });
+  Board.render({ lastMove: { from: 'e7', to: 'e5' }, cls: 'blunder' });
+  const badge = el.querySelector('.mv-badge');
+  assert.ok(badge, 'badge must render for a black move');
+  const style = badge.getAttribute('style') || '';
+  assert.match(style, /left:38\.7%/, 'flipped e-file is column 3, not 4');
+  assert.match(style, /top:50\.8%/, 'flipped rank 5 is row 4, not 3');
+  assert.equal(badge.textContent, '✕', 'a blunder shows its own icon');
+});
+
+test('the review board badges the played piece on every ply, not the next move', () => {
+  const { context } = loadApp();
+  const { Review, Board, mountReviewBoard, classifyPly } = context.__test;
+  // mountReviewBoard() returns early when #review-board is absent, and the
+  // Review view is not mounted in the test DOM, so create the host here.
+  const host = context.document.createElement('div');
+  host.id = 'review-board';
+  context.document.body.appendChild(host);
+
+  // A real Ruy Lopez main line, with every ply classified for real.
+  const sans = ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5', 'a6', 'Ba4', 'Nf6', 'O-O', 'Be7', 'Re1', 'b5', 'Bb3', 'd6', 'c3', 'O-O'];
+  const rep = new Chess();
+  const plies = [];
+  for (let i = 0; i < sans.length; i++) {
+    const fenBefore = rep.fen();
+    const mv = rep.moves({ verbose: true }).find(x => x.san === sans[i]);
+    assert.ok(mv, 'SAN from the probe line must be legal: ' + sans[i]);
+    const uci = mv.from + mv.to + (mv.promotion || '');
+    rep.move({ from: mv.from, to: mv.to, promotion: mv.promotion });
+    const c = classifyPly({ fenBefore, uci }, { best: uci, bestCpWhite: 20, secondCpWhite: 19 }, { bestCpWhite: 19, secondCpWhite: 10 }, mv.color, Math.floor(i / 2) + 1);
+    plies.push({ fenBefore, san: sans[i], uci, mover: mv.color, moveNum: Math.floor(i / 2) + 1, cls: c.cls, sacPawns: c.sacPawns, evalBefore: { best: uci, bestCpWhite: 20, secondCpWhite: 19 }, evalAfter: { bestCpWhite: 19, secondCpWhite: 10 } });
+  }
+  Review.data = { key: 'badge', username: 'me' };
+  Review.headers = { White: 'me', Black: 'opp', Result: '*' };
+  Review.hist = plies.map(p => ({ san: p.san, uci: p.uci }));
+  Review.plys = plies;
+  Review.branch = null;
+
+  // Read the maps from the source so this test cannot drift from the app.
+  const src = inlineScripts.join('\n');
+  const iconRule = (src.match(/CLS_ICON\s*=\s*\{[^}]+\}/) || [])[0] || '';
+  const ICONS = Object.fromEntries([...iconRule.matchAll(/(\w+):'([^']*)'/g)].map(m => [m[1], m[2]]));
+  const LABELS = { brilliant: 'Brilliant', great: 'Great', best: 'Best', excellent: 'Excellent', good: 'Good', book: 'Book', inaccuracy: 'Inaccuracy', mistake: 'Mistake', blunder: 'Blunder', q: '?' };
+
+  const seen = [];
+  for (let ply = 0; ply <= Review.plys.length; ply++) {
+    Review.nav = ply;
+    mountReviewBoard();
+    const p = ply > 0 ? Review.plys[ply - 1] : null;
+    // The badge must mark the move that was PLAYED. The off-by-one here is
+    // the whole feature: using plys[ply] would badge the next move instead.
+    assert.equal(Board.lastMove ? Board.lastMove.to : null, p ? p.uci.slice(2, 4) : null, 'lastMove must be the played move at ply ' + ply);
+    assert.equal(Board.cls, p ? p.cls : null, 'badge class must come from the played ply at ply ' + ply);
+    const badge = host.querySelector('.mv-badge');
+    if (p) {
+      assert.ok(badge, 'a badge must be rendered at ply ' + ply);
+      // The glyph must be the one this class maps to, and the accessible name
+      // the class label -- so the board mark is not colour-only.
+      assert.equal(badge.textContent, ICONS[p.cls], 'badge glyph must match the class at ply ' + ply);
+      assert.equal(badge.getAttribute('title'), LABELS[p.cls], 'badge title must match the class at ply ' + ply);
+      assert.ok(badge.className.includes('cls-' + p.cls), 'badge style must match the class at ply ' + ply);
+    } else {
+      assert.equal(badge, null, 'no badge before any move is played');
+    }
+    seen.push(p ? p.san : '-');
+  }
+  assert.equal(seen.length, plies.length + 1, 'every ply must be visited');
+});
+
+test('the board badge is drawn above the piece it marks', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  g.move('e4'); g.move('e5'); g.move('Nf3');
+  Board.init(el, g, { interactive: false });
+  Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: 'brilliant' });
+  // The badge must live in its own layer that stacks above the piece
+  // (z-index 10). Drawn into the shared overlay (z-index 6) it would be
+  // hidden behind the very piece it is marking, and the feature would be
+  // invisible while every DOM-level test still passed.
+  const layer = el.querySelector('.badge-layer');
+  assert.ok(layer, 'the badge needs a dedicated layer');
+  // jsdom does not expand style.cssText, so assert on the declared value.
+  const layerZ = parseInt((layer.getAttribute('style').match(/z-index:\s*(\d+)/) || [])[1] || '0', 10);
+  const pieceEl = el.querySelector('.piece');
+  assert.ok(pieceEl, 'a piece must be rendered');
+  const pieceZ = 10; // .piece z-index in the stylesheet
+  assert.ok(layerZ > pieceZ, 'badge layer (' + layerZ + ') must stack above pieces (' + pieceZ + ')');
+  assert.ok(el.querySelector('.overlay .mv-badge') === null, 'the badge must not be drawn in the shared overlay');
+  assert.ok(layer.querySelector('.mv-badge'), 'the badge must be inside the badge layer');
+  // And it must still be under the arrow layer, so engine arrows stay visible.
+  const arrowZ = 20;
+  assert.ok(layerZ < arrowZ, 'badge layer must stay below arrows (' + arrowZ + ')');
+});
+
+test('a Review badge does not leak onto the Play or Openings board', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  g.move('e4'); g.move('e5'); g.move('Nf3');
+  Board.init(el, g, { interactive: false });
+  Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: 'blunder' });
+  assert.equal(el.querySelector('.mv-badge').textContent, '✕', 'the badge is set for the review move');
+  // Every other view calls Board.render() with no class. Board is a single
+  // shared instance, so the badge must be dropped rather than left stuck on.
+  Board.render();
+  assert.equal(Board.cls, null, 'a bare render must clear the class');
+  assert.equal(el.querySelector('.mv-badge'), null, 'no stale badge after a bare render');
+  // And re-mounting another board must not resurrect it either.
+  Board.init(el, new Chess(), { interactive: false });
+  Board.render();
+  assert.equal(Board.cls, null, 'a fresh board starts with no class');
+  assert.equal(el.querySelector('.mv-badge'), null, 'no badge on a fresh board');
+});
+
 test('an exchange that wins equal material back is not a sacrifice', () => {
   const { context } = loadApp();
   const { classifyPly } = context;
