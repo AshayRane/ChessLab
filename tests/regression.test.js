@@ -72,7 +72,7 @@ function loadApp({ storage = {} } = {}) {
   const script = inlineScripts.join('\n');
   vm.createContext(context);
   vm.runInContext(script, context, { filename: 'index-inline.js' });
-  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, Importer, classifyPly, analyzeGame, validateState, defaultState, render, renderPlay, renderOpenings, renderReview, renderReviewReport, mountBuilderBoard, mountReviewBoard, runAnalysis, renderProgress, openModal, handleAction, go, myColorOf, myColorOfHeaders, validateAnalyzedChain, sanitizeMoves, ensureBuilderModel, activeBuilderBranch, createBuilderBranch, switchBuilderBranch, builderDiverges, syncBuilderBranch, savePlaybook, recordBuilderMove };', context);
+  vm.runInContext('globalThis.__test = { Store, App, Play, Engine, Board, Review, Importer, classifyPly, analyzeGame, validateState, defaultState, render, renderPlay, renderOpenings, renderReview, renderReviewReport, mountBuilderBoard, mountReviewBoard, runAnalysis, renderProgress, openModal, handleAction, go, myColorOf, myColorOfHeaders, validateAnalyzedChain, sanitizeMoves, ensureBuilderModel, activeBuilderBranch, createBuilderBranch, switchBuilderBranch, builderDiverges, syncBuilderBranch, savePlaybook, recordBuilderMove, BOOK_LINES };', context);
   return { dom, window, context, waitFor };
 }
 
@@ -103,6 +103,294 @@ test('source exposes the corrected lifecycle and hardening hooks', () => {
     'AbortController'
   ]) assert.equal(source.includes(needle), true, `missing ${needle}`);
   assert.equal(source.includes('data-ply="${i+1}"></span>'), false);
+});
+
+test('classifyPly gives a near-best move Best instead of Excellent', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // Midgame position: no book theory applies, so this isolates the
+  // near-best tolerance. Bd3 is not the engine's top choice but gives up a
+  // vanishingly small amount of win chance, so it is equally good -> Best.
+  const fenBefore = 'r1bq1rk1/ppp2ppp/2n5/3np3/1b2P3/2N1BN2/PPP2PPP/R2Q1RK1 w - - 0 9';
+  const c = classifyPly({ fenBefore, uci: 'f3d3' }, { best: 'c3b1', bestCpWhite: 30, secondCpWhite: 28 }, { bestCpWhite: 28, secondCpWhite: 20 }, 'w', 9);
+  assert.equal(c.cls, 'best');
+});
+
+test('classifyPly keeps Excellent for a move that gives up real win chance', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // Same position and move, but now the move genuinely gives up win chance
+  // (1.37%) against a better engine choice. That is above the near-best
+  // noise floor and below the 2% Excellent ceiling, so: Excellent, not Best.
+  const fenBefore = 'r1bq1rk1/ppp2ppp/2n5/3np3/1b2P3/2N1BN2/PPP2PPP/R2Q1RK1 w - - 0 9';
+  const c = classifyPly({ fenBefore, uci: 'f3d3' }, { best: 'c3b1', bestCpWhite: 45, secondCpWhite: 10 }, { bestCpWhite: 30, secondCpWhite: 10 }, 'w', 9);
+  assert.equal(c.cls, 'excellent');
+});
+
+test('classifyPly awards Great only when the move is both best and uniquely best', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  const fenBefore = 'r1bq1rk1/ppp2ppp/2n5/3np3/1b2P3/2N1BN2/PPP2PPP/R2Q1RK1 w - - 0 9';
+  const played = 'f3d3';
+  // Best move is far ahead of the second choice in win probability -> Great.
+  const great = classifyPly({ fenBefore, uci: played }, { best: played, bestCpWhite: 60, secondCpWhite: -120 }, { bestCpWhite: 58, secondCpWhite: -120 }, 'w', 9);
+  assert.equal(great.cls, 'great');
+  // A 300cp gap, but between two already-crushing evaluations the gap is
+  // worth almost nothing in win probability. That is Best, not Great.
+  const crushing = classifyPly({ fenBefore, uci: played }, { best: played, bestCpWhite: 1500, secondCpWhite: 1200 }, { bestCpWhite: 1498, secondCpWhite: 1200 }, 'w', 9);
+  assert.equal(crushing.cls, 'best');
+});
+
+test('classifyPly awards Book for real opening theory played correctly', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  const start = new Chess().fen();
+  // 1.e4 is book theory and a sound move.
+  const theory = classifyPly({ fenBefore: start, uci: 'e2e4' }, { best: 'e2e4', bestCpWhite: 25, secondCpWhite: 24 }, { bestCpWhite: 24, secondCpWhite: 10 }, 'w', 1);
+  assert.equal(theory.cls, 'book');
+  // The same theory move when it throws the game away is a blunder, not Book.
+  const broken = classifyPly({ fenBefore: start, uci: 'e2e4' }, { best: 'g1f3', bestCpWhite: 25, secondCpWhite: 24 }, { bestCpWhite: -900, secondCpWhite: -950 }, 'w', 1);
+  assert.equal(broken.cls, 'blunder');
+});
+
+test('every move class has a distinct colour and a distinct icon', () => {
+  const style = (html.match(/<style[^>]*>([\s\S]*?)<\/style>/i) || [])[1] || '';
+  // Strip the dark-theme overrides first so only the 10 light rules are counted.
+  const lightOnly = style.replace(/html\[data-theme="dark"\][^{]*\{[^}]*\}/g, '').replace(/html\[data-theme="dark"\]\s*\.[^{]*\{[^}]*\}/g, '');
+  const cls = lightOnly.match(/\.cls-(brilliant|great|best|excellent|good|book|inaccuracy|mistake|blunder|q)\{background:([^;}]+)[^}]*\}/g) || [];
+  assert.equal(cls.length, 10, 'expected exactly 10 light-theme colour rules, matched ' + cls.length);
+  const colours = cls.map(s => (s.match(/background:([^;}]+)/) || [])[1]);
+  const named = new Set(cls.map(s => (s.match(/\.cls-([a-z]+)/) || [])[1]));
+  assert.equal(named.size, 10, 'every class needs its own colour rule, got: ' + [...named].join(','));
+  assert.equal(new Set(colours).size, colours.length, 'class colours must be unique: ' + colours.join(','));
+  const iconRule = (inlineScripts.join('\n').match(/CLS_ICON\s*=\s*\{[^}]+\}/) || [])[0];
+  assert.ok(iconRule, 'CLS_ICON map is required');
+  const pairs = [...iconRule.matchAll(/([a-z]+):'([^']+)'/g)].map(m => m[1] + '=' + m[2]);
+  assert.equal(pairs.length, 10, 'CLS_ICON must cover all 10 classes: ' + pairs.join(','));
+  assert.equal(new Set(pairs.map(p => p.split('=')[1])).size, 10, 'each class needs a unique icon glyph: ' + pairs.join(','));
+});
+
+test('the move list shows the quality icon beside each move', () => {
+  const { context } = loadApp();
+  const { Review, renderReviewReport } = context.__test;
+  const g = new Chess(); g.move('e4'); g.move('e5');
+  const start = new Chess(); const afterE4 = new Chess(); afterE4.move('e4');
+  Review.open({ key: 'icons', pgn: g.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: start.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'brilliant' },
+      { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: { best: 'e7e5', bestCpWhite: 0, secondCpWhite: 0 }, evalAfter: { bestCpWhite: 0, secondCpWhite: 0 }, cls: 'blunder' }
+    ] });
+  const html = renderReviewReport();
+  assert.match(html, /mv-ico[^>]*>★/);
+  assert.match(html, /mv-ico[^>]*>✕/);
+  assert.match(html, /title="e4 — Brilliant"/);
+  assert.match(html, /title="e5 — Blunder"/);
+  assert.match(html, /aria-label="e4, Brilliant"/);
+  assert.match(html, /aria-label="e5, Blunder"/);
+});
+
+test('an ordinary developing move is not counted as a sacrifice', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // Black to move after 1.e4 e5 2.Nf3 Nc6 3.Bb5. Playing a6 is a normal
+  // Ruy Lopez developing move. White's bishop attacks a6 (a 1-pawn risk, not
+  // a sacrifice) and can take the c6 knight, but that knight was already loose
+  // before the move. Counting that pre-existing material is what used to
+  // score a6 as brilliant.
+  const fenBefore = 'r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 1 3';
+  const c = classifyPly({ fenBefore, uci: 'a7a6' }, { best: 'a7a6', bestCpWhite: 20, secondCpWhite: 19 }, { bestCpWhite: 19, secondCpWhite: 10 }, 'b', 3);
+  assert.ok(c.sacPawns < 2, 'a6 is a developing move, not a material sacrifice (got ' + c.sacPawns + ')');
+  assert.notEqual(c.cls, 'brilliant');
+});
+
+test('a developing move beside already-loose material is not a sacrifice', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // Black plays 4..Nf6. The c6 knight is hanging to Bxc6, but that was
+  // already true before the move. Nf6 itself risks nothing, so it must score
+  // zero material at risk rather than the 3 points of the loose knight.
+  const fenBefore = 'r1bqkbnr/pp1ppppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq - 1 3';
+  const c = classifyPly({ fenBefore, uci: 'g8f6' }, { best: 'g8f6', bestCpWhite: 20, secondCpWhite: 19 }, { bestCpWhite: 19, secondCpWhite: 10 }, 'b', 4);
+  assert.equal(c.sacPawns, 0, 'Nf6 risks nothing of its own');
+  assert.notEqual(c.cls, 'brilliant');
+});
+
+test('a real queen sacrifice is detected as material at risk', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // White plays Qh5 offering the queen on an undefended square: a genuine
+  // sacrifice, which is the only thing that should earn brilliant.
+  const fenBefore = '4k2r/8/8/8/8/8/8/4K2Q w - - 0 1';
+  const c = classifyPly({ fenBefore, uci: 'h1h5' }, { best: 'h1h5', bestCpWhite: 20, secondCpWhite: -120 }, { bestCpWhite: 18, secondCpWhite: -120 }, 'w', 3);
+  assert.ok(c.sacPawns >= 9, 'an undefended queen must be seen as material at risk');
+  assert.equal(c.cls, 'brilliant');
+});
+
+test('a defended landing square only gives up what the defence cannot save', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // White plays Nb1-a3, which the a8 rook can take. The b2 pawn does answer
+  // with bxa3, so the pawn is not lost -- but the knight still is. Trading a
+  // knight for a pawn gives up two, which is the least the brilliant gate
+  // accepts.
+  const fenBefore = 'r3k3/8/8/8/8/8/1P6/1N2K3 w - - 0 1';
+  const c = classifyPly({ fenBefore, uci: 'b1a3' }, { best: 'b1a3', bestCpWhite: 20, secondCpWhite: 19 }, { bestCpWhite: 19, secondCpWhite: 10 }, 'w', 1);
+  assert.equal(c.sacPawns, 2, 'the knight is lost even though the pawn answers: 3 - 1 = 2');
+});
+
+test('the opening book is recognised through a transposition', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // The Semi-Slav position reached as 1.d4 d5 2.c4 c6 (the book line) and as
+  // 1.c4 c6 2.d4 d5 (a different move order) is the same position. The move
+  // that continues it must be book either way, so the book key must not
+  // include the halfmove clock.
+  const book = new Chess();
+  for (const san of ['d4', 'd5', 'c4', 'c6']) book.move(san);
+  const transposed = new Chess();
+  for (const san of ['c4', 'c6', 'd4', 'd5']) transposed.move(san);
+  assert.notEqual(book.fen(), transposed.fen(), 'the two orders differ in the halfmove clock');
+  const key = (f) => f.split(' ').slice(0, 3).join(' ');
+  assert.equal(key(book.fen()), key(transposed.fen()), 'the positions themselves are identical');
+  const c = classifyPly({ fenBefore: transposed.fen(), uci: 'g1f3' }, { best: 'g1f3', bestCpWhite: 5, secondCpWhite: 0 }, { bestCpWhite: 4, secondCpWhite: -5 }, 'w', 3);
+  assert.equal(c.cls, 'book', 'a move continuing a transposed book position is still book');
+});
+
+test('a recapture that is itself met is not a defence', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // 1.Nb5! cxb5 2.axb5 Rxb5. White recaptures with the a-pawn, but that
+  // recaptured pawn is then taken too, so nothing was actually answered and
+  // White is three pawns down. The recapture exists on b5 yet does not hold.
+  const fenBefore = '1r5k/8/2p5/8/P7/N7/8/R3K3 w - - 0 1';
+  const c = classifyPly({ fenBefore, uci: 'a3b5' }, { best: 'a3b5', bestCpWhite: 20, secondCpWhite: -200 }, { bestCpWhite: 19, secondCpWhite: 10 }, 'w', 1);
+  assert.equal(c.sacPawns, 3, 'a recapture that is itself captured is not a real answer');
+});
+
+test('a recapture that trades up still leaves material at risk', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // White offers Qd5, Black takes it with the rook, and White can only answer
+  // with the c-pawn. The queen is gone and only a pawn comes back, so eight
+  // pawns are still given up -- answering the capture is not the same as
+  // saving the material.
+  const fenBefore = '4k3/3r4/8/8/2P5/8/8/3QK3 w - - 0 1';
+  const c = classifyPly({ fenBefore, uci: 'd1d5' }, { best: 'd1d5', bestCpWhite: 20, secondCpWhite: -200 }, { bestCpWhite: 19, secondCpWhite: 10 }, 'w', 1);
+  assert.equal(c.sacPawns, 8, 'a pawn recapture does not cancel a lost queen');
+});
+
+test('an exchange that wins equal material back is not a sacrifice', () => {
+  const { context } = loadApp();
+  const { classifyPly } = context;
+  // Ruy Lopez 4.Bxc6: White wins the knight, Black takes the bishop. Three
+  // pawns in, three pawns out -- an even exchange, so nothing is sacrificed.
+  const fenBefore = 'r1bqkb1r/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 0 4';
+  const c = classifyPly({ fenBefore, uci: 'b5c6' }, { best: 'b5c6', bestCpWhite: 20, secondCpWhite: 15 }, { bestCpWhite: 19, secondCpWhite: 10 }, 'w', 4);
+  assert.equal(c.sacPawns, 0, 'an even exchange gives nothing up net');
+  assert.notEqual(c.cls, 'brilliant');
+});
+
+test('every opening book line is a legal move sequence', () => {
+  const { context } = loadApp();
+  const { BOOK_LINES } = context.__test;
+  assert.ok(Array.isArray(BOOK_LINES) && BOOK_LINES.length >= 10, 'BOOK_LINES must be exported');
+  const illegal = [];
+  for (const line of BOOK_LINES) {
+    const g = new Chess();
+    for (let i = 0; i < line.length; i += 4) {
+      const uci = line.slice(i, i + 4);
+      const m = g.moves({ verbose: true }).find(x => x.from + x.to + (x.promotion || '') === uci);
+      if (!m) { illegal.push(line + ' @' + uci); break; }
+      g.move({ from: m.from, to: m.to, promotion: m.promotion });
+    }
+  }
+  assert.equal(illegal.length, 0, 'illegal or truncated book lines: ' + illegal.join(' | '));
+});
+
+test('move icon colours stay readable in both themes', () => {
+  const style = (html.match(/<style[^>]*>([\s\S]*?)<\/style>/i) || [])[1] || '';
+  const lum = (rgb) => {
+    const [r, g, b] = rgb.map((v) => {
+      const s = v / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const ratio = (a, b) => {
+    const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m);
+    return (x + 0.05) / (y + 0.05);
+  };
+  const classes = ['brilliant', 'great', 'best', 'excellent', 'good', 'book', 'inaccuracy', 'mistake', 'blunder', 'q'];
+  // light surface = the first (light theme) --surface; dark surface = the dark
+  // theme --surface, which is the one declared inside the dark selector.
+  const lightHex = (style.match(/--surface:\s*(#[0-9a-f]{6})/i) || [])[1];
+  const darkHex = (style.match(/html\[data-theme="dark"\]\{[^}]*--surface:\s*(#[0-9a-f]{6})/i) || [])[1];
+  assert.ok(lightHex, 'light --surface must be a hex colour');
+  assert.ok(darkHex, 'dark --surface must be a hex colour');
+  const hexRgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const light = hexRgb(lightHex);
+  const dark = hexRgb(darkHex);
+  const failing = [];
+  // The icons render on the move row (--surface), on .mv:hover and inside
+  // .cls-badge (both --surface-2), so every surface in both themes must pass.
+  const lightSurf2 = (style.match(/--surface-2:\s*(#[0-9a-f]{6})/i) || [])[1];
+  const darkSurf2 = (style.match(/html\[data-theme="dark"\]\{[^}]*--surface-2:\s*(#[0-9a-f]{6})/i) || [])[1];
+  assert.ok(lightSurf2, 'light --surface-2 must be a hex colour');
+  assert.ok(darkSurf2, 'dark --surface-2 must be a hex colour');
+  const surfaces = [['surface', light], ['surface-2', hexRgb(lightSurf2)]];
+  for (const c of classes) {
+    const lightInk = style.match(new RegExp('\\.cls-ink-' + c + '\\{color:(#[0-9a-f]{3,8})\\}'));
+    const darkInk = style.match(new RegExp('data-theme="dark"[^}]*\\.cls-ink-' + c + '\\{color:(#[0-9a-f]{3,8})\\}'));
+    assert.ok(lightInk, 'missing light ink for ' + c);
+    assert.ok(darkInk, 'missing dark-theme ink for ' + c);
+    const l = hexRgb(lightInk[1]);
+    const d = hexRgb(darkInk[1]);
+    for (const [nm, bg] of surfaces) {
+      const rl = ratio(l, bg);
+      if (rl < 4.5) failing.push(c + ' light ' + nm + ' ' + rl.toFixed(2) + ':1');
+    }
+    for (const [nm, bg] of [['surface', dark], ['surface-2', hexRgb(darkSurf2)]]) {
+      const rd = ratio(d, bg);
+      if (rd < 4.5) failing.push(c + ' dark ' + nm + ' ' + rd.toFixed(2) + ':1');
+    }
+  }
+  assert.deepEqual(failing, [], 'icon colours below WCAG AA 4.5:1: ' + failing.join(', '));
+
+  // The move dot is the only colour cue on the move button, so it must clear
+  // the 3:1 non-text minimum (WCAG 1.4.11) against the card in each theme.
+  const dotFail = [];
+  for (const c of classes) {
+    const lightDot = style.match(new RegExp('(?:^|[\\s,}])\\.cls-' + c + '\\{background:(#[0-9a-f]{6})\\}'));
+    const darkDot = style.match(new RegExp('\\[data-theme=.dark.\\]\\s+\\.cls-' + c + '\\{background:(#[0-9a-f]{6})\\}'));
+    assert.ok(lightDot, 'missing light dot colour for ' + c);
+    assert.ok(darkDot, 'missing dark dot colour for ' + c);
+    if (ratio(hexRgb(lightDot[1]), light) < 3) dotFail.push(c + ' light dot ' + ratio(hexRgb(lightDot[1]), light).toFixed(2) + ':1');
+    if (ratio(hexRgb(darkDot[1]), dark) < 3) dotFail.push(c + ' dark dot ' + ratio(hexRgb(darkDot[1]), dark).toFixed(2) + ':1');
+  }
+  assert.deepEqual(dotFail, [], 'move dot colours below WCAG 1.4.11 3:1: ' + dotFail.join(', '));
+});
+
+test('the move list exposes an accessible name for each quality', () => {
+  const { context } = loadApp();
+  const { Review, renderReviewReport } = context.__test;
+  const g = new Chess();
+  for (const san of ['e4', 'e5', 'Nf3', 'Nc6']) g.move(san);
+  const rep = new Chess();
+  const CLASSES = ['book', 'book', 'best', 'excellent'];
+  const plies = [];
+  ['e4', 'e5', 'Nf3', 'Nc6'].forEach((san, i) => {
+    const fenBefore = rep.fen();
+    const mv = rep.moves({ verbose: true }).find(x => x.san === san);
+    const uci = mv.from + mv.to + (mv.promotion || '');
+    rep.move({ from: mv.from, to: mv.to, promotion: mv.promotion });
+    plies.push({ fenBefore, san, uci, mover: mv.color, moveNum: 1, cls: CLASSES[i], evalBefore: { best: uci, bestCpWhite: 0, secondCpWhite: 0 }, evalAfter: { bestCpWhite: 0, secondCpWhite: 0 } });
+  });
+  Review.open({ key: 'k', pgn: g.pgn(), headers: { White: 'A', Black: 'B', Result: '1-0' }, summary: {}, plies });
+  const out = renderReviewReport();
+  for (const label of ['Book', 'Best', 'Excellent']) {
+    assert.ok(new RegExp('aria-label="[^"]*, ' + label + '"').test(out), 'move button for ' + label + ' needs an aria-label naming its quality');
+  }
+  assert.ok(!/aria-label="[^"]*book"/.test(out), 'aria-label should use the display label, not the internal class key');
 });
 
 test('classifyPly computes mover-POV sacrifice and Black great-move gap', () => {

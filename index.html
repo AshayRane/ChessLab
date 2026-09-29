@@ -162,9 +162,35 @@ table.tbl tr:last-child td{border-bottom:none}
 .mv:hover{background:var(--surface-2)}
 .mv.cur{background:rgba(129,182,76,.16);box-shadow:inset 0 0 0 2px var(--green)}
 .mv-dot{width:9px;height:9px;border-radius:50%;flex:none}
-.cls-best,.cls-brilliant,.cls-great{background:#26c2a3}.cls-excellent{background:#95bb4a}
-.cls-good{background:#95bb4a}.cls-book{background:#a88865}.cls-inaccuracy{background:#f7c631}
-.cls-mistake{background:#ffa459}.cls-blunder{background:#fa412d}.cls-q{background:#c8c6c4}
+.mv-ico{font-size:11px;line-height:1;flex:none;width:14px;text-align:center;font-weight:700;overflow:hidden;font-family:"Segoe UI Symbol","Apple Symbols",system-ui,sans-serif}
+.cls-ink-brilliant{color:#00695c}.cls-ink-great{color:#166534}.cls-ink-best{color:#3f6212}
+.cls-ink-excellent{color:#854d0e}.cls-ink-good{color:#7c3f06}.cls-ink-book{color:#5b21b6}
+.cls-ink-inaccuracy{color:#9a3412}.cls-ink-mistake{color:#991b1b}.cls-ink-blunder{color:#7f1d1d}
+.cls-ink-q{color:#374151}
+html[data-theme="dark"] .cls-ink-brilliant{color:#5eead4}
+html[data-theme="dark"] .cls-ink-great{color:#86efac}
+html[data-theme="dark"] .cls-ink-best{color:#bef264}
+html[data-theme="dark"] .cls-ink-excellent{color:#fde047}
+html[data-theme="dark"] .cls-ink-good{color:#fcd34d}
+html[data-theme="dark"] .cls-ink-book{color:#c4b5fd}
+html[data-theme="dark"] .cls-ink-inaccuracy{color:#fdba74}
+html[data-theme="dark"] .cls-ink-mistake{color:#fca5a5}
+html[data-theme="dark"] .cls-ink-blunder{color:#fecaca}
+html[data-theme="dark"] .cls-ink-q{color:#b0b8c4}
+.cls-brilliant{background:#0f766e}.cls-great{background:#15803d}.cls-best{background:#4d7c0f}
+.cls-excellent{background:#a16207}.cls-good{background:#b45309}.cls-book{background:#6d28d9}
+.cls-inaccuracy{background:#c2410c}.cls-mistake{background:#b91c1c}.cls-blunder{background:#991b1b}
+.cls-q{background:#4b5563}
+html[data-theme="dark"] .cls-brilliant{background:#00d9c0}
+html[data-theme="dark"] .cls-great{background:#4ade80}
+html[data-theme="dark"] .cls-best{background:#a3e635}
+html[data-theme="dark"] .cls-excellent{background:#fde047}
+html[data-theme="dark"] .cls-good{background:#fbbf24}
+html[data-theme="dark"] .cls-book{background:#a78bfa}
+html[data-theme="dark"] .cls-inaccuracy{background:#fb923c}
+html[data-theme="dark"] .cls-mistake{background:#f87171}
+html[data-theme="dark"] .cls-blunder{background:#ef4444}
+html[data-theme="dark"] .cls-q{background:#9ca3af}
 .cls-badge{display:inline-flex;align-items:center;gap:8px;font-weight:700;font-size:14px;padding:6px 13px;border-radius:8px;background:var(--surface-2)}
 .cls-badge i{width:10px;height:10px;border-radius:50%}
 .review-ctl{display:flex;gap:6px;justify-content:center}
@@ -219,7 +245,7 @@ table.tbl tr:last-child td{border-bottom:none}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.4</span>
+<span class="ver-badge" title="ChessLab version">v2.7.5</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -750,15 +776,124 @@ function materialRiskAfter(fen, uci, mover){
     const m=g.moves({verbose:true}).find(x=>x.from+x.to+(x.promotion||'')===uci);
     if(!m) return 0;
     g.move({from:m.from,to:m.to,promotion:m.promotion});
-    const opponent = mover==='w' ? 'b' : 'w';
-    let risk=0;
-    for(const reply of g.moves({verbose:true})){
-      if(reply.captured && g.get(reply.to) && g.get(reply.to).color===mover){
-        risk=Math.max(risk, pieceVal(reply.captured));
+    // Material at risk = what the opponent can win from the piece this move
+    // places, less what this move wins, and only when the defender cannot
+    // answer.
+    //   * Only captures ON the square we played to count. Material that was
+    //     already loose elsewhere is not this move's doing.
+    //   * A defender's recapture is credited back at its own value: a pawn
+    //     answering a queen saves the pawn, not the queen.
+    //   * A recapture that is itself met is no answer at all.
+    // This measures material GIVEN, not material won later, so a positional
+    // sacrifice that wins back more than it costs (a bishop taken to skewer a
+    // queen) reports only the piece offered. The move is still ranked by the
+    // engine's evaluation, so the class stays correct; this number is the
+    // "Material invested" figure in the detail panel.
+    // What this move wins: a capture nets it material, which offsets any
+    // material it then risks giving back.
+    const won = m.captured ? pieceVal(m.captured) : 0;
+    // The opponent's best reply: take the piece we just offered on `to`, less
+    // whatever the defender can win back with a recapture that holds.
+    let risk = 0;
+    for (const r of g.moves({verbose:true})) {
+      if(!r.captured || r.to !== m.to) continue;
+      const t = new Chess(g.fen());
+      t.move({from:r.from,to:r.to,promotion:r.promotion});
+      // The defender may recapture on the square the capturer now stands on.
+      // That answers the capture, but not for free: a pawn answering a queen
+      // still loses the difference, so credit back only what the recapturing
+      // piece is worth, and only when the recapture itself holds. A recapture
+      // that is itself met is no answer at all -- the threat lands on `a.to`,
+      // where the recapturing piece now sits, not on `a.from`, which it has
+      // just vacated.
+      let recovered = 0;
+      for (const a of t.moves({verbose:true})) {
+        if(!a.captured || a.to !== r.to) continue;
+        const b = new Chess(t.fen());
+        b.move({from:a.from,to:a.to,promotion:a.promotion});
+        if(b.moves({verbose:true}).some(x => x.captured && x.to === a.to)) continue;
+        // The defender answers with whatever saves the most material.
+        const val = pieceVal(a.piece);
+        if(val > recovered) recovered = val;
+      }
+      const line = pieceVal(r.captured) - recovered;
+      if(line > risk) risk = line;
+    }
+    const net = risk - won;
+    if(net <= 0) return 0;
+    return net;
+  }catch(e){ return 0; }
+}
+const CLS_ICON = {brilliant:'★',great:'!!',best:'!',excellent:'✓',good:'○',book:'≡',inaccuracy:'?!',mistake:'?',blunder:'✕',q:'·'};
+/* A move is "as good as the engine's top choice" when the win probability it
+   gives up is within the noise floor of the search. Without this tolerance any
+   move the engine happened not to rank first was mislabelled Excellent. */
+const NEAR_BEST_DELTA = 1.0;
+/* "Only move" is a claim about win probability, not raw centipawns: a 300cp
+   gap between +15 and +18 is worth nothing, while 300cp across zero is huge. */
+const ONLY_MOVE_WP_GAP = 8;
+/* Opening book: the UCI moves that continue a standard opening line, keyed by
+   the position (FEN) they are played from. A move is "Book" only when it is in
+   a real opening AND it is also a sound move -- theory you misplayed is still
+   an inaccuracy, a mistake or a blunder, never Book. */
+const BOOK_LINES = [
+  'e2e4e7e5g1f3b8c6f1b5a7a6e1g1g8f6f1e1',
+  'e2e4e7e5g1f3b8c6f1c4f8c5',
+  'e2e4e7e5g1f3b8c6d2d4e5d4f3d4g8f6',
+  'e2e4e7e5g1f3b8c6d2d4e5d4',
+  'e2e4e7e5g1f3b8c6b1c3',
+  'e2e4e7e5g1f3g8f6f3e5',
+  'e2e4c7c5g1f3d7d6d2d4c5d4f3d4g8f6b1c3a7a6',
+  'e2e4c7c5g1f3b8c6d2d4c5d4f3d4g8f6b1c3d7d6',
+  'e2e4c7c5c2c4g8f6b1c3d7d6d2d4c5d4g2g3',
+  'e2e4c7c5g1f3d7d6d2d4c5d4f3d4g8f6b1c3a7a6c1g5',
+  'e2e4e7e6d2d4d7d5e4e5c7c5c2c4b8c6b1c3g8f6',
+  'e2e4e7e6d2d4d7d5b1c3g8f6c1g5f8e7d1d2e8g8',
+  'e2e4c7c6d2d4d7d5b1c3g8f6c1g5e7e6g1f3',
+  'e2e4c7c6d2d4d7d5b1c3g8f6',
+  'd2d4d7d5c2c4c7c6g1f3g8f6c1g5e7e6e2e3f8e7',
+  'd2d4d7d5c2c4c7c6',
+  'e2e4d7d5e4d5d8d5',
+  'c2c4e7e5g1f3g8f6g2g3',
+  'g1f3d7d5g2g3',
+  'e2e4g8f6e4e5f6d5d2d4d7d6',
+  'e2e4d7d6d2d4g8f6b1c3g7g6g1f3f8g7',
+  'd2d4g8f6c2c4g7g6b1c3f8g7e2e4d7d6g1f3',
+  'd2d4g8f6c2c4g7g6b1c3d7d5c4d5f6d5e2e4d5c3',
+  'd2d4g8f6c2c4e7e6b1c3f8b4e2e3e8g8',
+  'd2d4d7d5g1f3g8f6c1f4',
+  'd2d4d7d5c2c4e7e6b1c3g8f6c1g5f8e7g1f3e8g8',
+  'e2e4e7e5b1c3g8f6f1c4f8c5',
+  'e2e4e7e5g1f3b8c6d2d4e5d4f3d4g8f6d4c6b7c6',
+  'd2d4d7d5c2c4e7e6g1f3g8f6c1g5f8e7d1d2e8g8',
+  'd2d4d7d5c2c4e7e6b1c3g8f6c1g5f8e7d1d2e8g8'
+];
+let BOOK_MAP = null;
+function bookMap(){
+  if(BOOK_MAP) return BOOK_MAP;
+  BOOK_MAP = new Map();
+  try{
+    for(const line of BOOK_LINES){
+      const g = new Chess();
+      for(let i=0;i<line.length;i+=4){
+        const uci = line.slice(i,i+4);
+        const m = g.moves({verbose:true}).find(x=>x.from+x.to+(x.promotion||'')===uci);
+        if(!m) break;
+        // Key on piece placement, side to move and castling rights only. The
+        // halfmove clock and the en passant square differ between move orders
+        // that reach the same position, so including them missed most games.
+        const key = g.fen().split(' ').slice(0, 3).join(' ');
+        if(!BOOK_MAP.has(key)) BOOK_MAP.set(key, new Set());
+        BOOK_MAP.get(key).add(uci);
+        g.move({from:m.from,to:m.to,promotion:m.promotion});
       }
     }
-    return risk;
-  }catch(e){ return 0; }
+  }catch(e){ BOOK_MAP = new Map(); }
+  return BOOK_MAP;
+}
+function isBookMove(fen, uci){
+  const set = bookMap().get(String(fen || '').split(' ').slice(0, 3).join(' '));
+  return !!(set && set.has(uci));
 }
 function classifyPly(ply, prevEval, curEval, mover, moveNum){
   // prevEval: engine result at position BEFORE the move; curEval: result at position AFTER
@@ -769,17 +904,24 @@ function classifyPly(ply, prevEval, curEval, mover, moveNum){
   const delta = Math.max(0, Math.round((wpB-wpA)*10)/10);
   const playedUci = ply.uci;
   const bestUci = prevEval.best;
-  const isBest = !!bestUci && playedUci===bestUci;
+  const isEngineBest = !!bestUci && playedUci===bestUci;
   const playedRisk = materialRiskAfter(ply.fenBefore, playedUci, mover);
   const sacPawns = playedRisk;
   const bestCpMover = moverCp(prevEval, 'bestCpWhite', mover);
   const secondCpMover = moverCp(prevEval, 'secondCpWhite', mover);
-  const onlyMoveGap = bestCpMover!=null && secondCpMover!=null ? bestCpMover-secondCpMover : null;
+  // Only-move gap measured in win-probability points, so it means the same
+  // thing in a sharp middlegame and in a position that is already decided.
+  const onlyMoveGap = (bestCpMover!=null && secondCpMover!=null)
+    ? Math.abs(WP(bestCpMover) - WP(secondCpMover))
+    : null;
 
   let cls;
-  if(isBest){
+  if(isEngineBest || delta <= NEAR_BEST_DELTA){
+    // Only a real, playable sacrifice counts, and only while the position is
+    // still in play: giving material up in a won position is not brilliant.
     if(sacPawns >= 2 && delta <= 2 && wpB >= 35 && wpB <= 85) cls = 'brilliant';
-    else if(onlyMoveGap != null && onlyMoveGap >= 100 && moveNum >= 2) cls = 'great';
+    else if(onlyMoveGap != null && onlyMoveGap >= ONLY_MOVE_WP_GAP && moveNum >= 2) cls = 'great';
+    else if(moveNum <= 10 && isBookMove(ply.fenBefore, playedUci)) cls = 'book';
     else cls = 'best';
   }
   else if(delta <= 2) cls = 'excellent';
@@ -787,7 +929,6 @@ function classifyPly(ply, prevEval, curEval, mover, moveNum){
   else if(delta <= 10) cls = 'inaccuracy';
   else if(delta <= 20) cls = 'mistake';
   else cls = 'blunder';
-  // "Book" requires an opening database; do not invent a classification from ply number.
   return {cls, delta, wpBefore:Math.round(wpB*10)/10, wpAfter:Math.round(wpA*10)/10, sacPawns, onlyMoveGap};
 }
 
@@ -1447,9 +1588,9 @@ function renderReviewReport(){
     detail = `<p class="small"><b>${branchLabel}:</b> ${branchMove.moveNum}${branchMove.mover==='w'?'.':'...'} ${esc(branchMove.san)}</p>`+
       (branchMove.evalAfter?`<p class="small">Eval: ${evalLabel(branchMove.evalBefore)} → ${evalLabel(branchMove.evalAfter)}${bdelta!=null?` · <b style="color:${bdelta>=0?'var(--green)':'var(--blun)'}">${bdelta>=0?'+':''}${bdelta}% ${branchMove.mover==='w'?'White':'Black'} win chance</b>`:''}</p>`:'');
   }else if(curPly){
-    const cls = curPly.cls||'q';
+    const cls = CLS_ICON[curPly.cls] !== undefined ? curPly.cls : 'q';
     detail = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-      <span class="cls-badge"><i class="cls-dot cls-${cls}"></i>${CLS_LABEL[cls]||'?'}</span>
+      <span class="cls-badge"><i class="cls-dot cls-${cls}"></i><span class="mv-ico cls-ink-${cls}" aria-hidden="true">${CLS_ICON[cls]||''}</span>${CLS_LABEL[cls]||'?'}</span>
       <b>${curPly.moveNum}${curPly.mover==='w'?'.':'...'} ${esc(curPly.san)}</b></div>`;
     if(cls!=='?'){
       detail += `<p class="small muted mt-8">Best: <b>${esc(curPly.bestSan||'?')}</b>${curPly.bestUci===curPly.uci?' (this move)':''}</p>
@@ -1460,11 +1601,16 @@ function renderReviewReport(){
   }
   const mySum = myColor && R.summary ? (R.summary[myColor==='w'?'white':'black'] || null) : null;
   let rows='';
+  const moveBtn=(idx)=>{
+    const pl = R.plys[idx];
+    // Fall back to the neutral class for anything unexpected, so a stored or
+    // unrecognised value can never emit an unstyled `cls-<value>`.
+    const cls = (pl && CLS_ICON[pl.cls] !== undefined) ? pl.cls : 'q';
+    const label = CLS_LABEL[cls] || '?';
+    return `<button class="mv${ply===idx+1?' cur':''}" data-ply="${idx+1}" title="${esc(R.hist[idx].san)} — ${label}" aria-label="${esc(R.hist[idx].san)}, ${label}"><span class="mv-dot cls-${cls}"></span><span class="mv-ico cls-ink-${cls}" aria-hidden="true">${CLS_ICON[cls]||''}</span>${esc(R.hist[idx].san)}</button>`;
+  };
   for(let i=0;i<R.hist.length;i+=2){
-    const a=R.plys[i], b2=R.plys[i+1];
-    rows += `<div class="mv-row"><span class="mv-num">${i/2+1}</span>
-      <button class="mv${ply===i+1?' cur':''}" data-ply="${i+1}"><span class="mv-dot cls-${a?a.cls:'q'}"></span>${esc(R.hist[i].san)}</button>
-      ${R.hist[i+1]?`<button class="mv${ply===i+2?' cur':''}" data-ply="${i+2}"><span class="mv-dot cls-${b2?b2.cls:'q'}"></span>${esc(R.hist[i+1].san)}</button>`:'<span></span>'}</div>`;
+    rows += `<div class="mv-row"><span class="mv-num">${i/2+1}</span>${moveBtn(i)}${R.hist[i+1]?moveBtn(i+1):'<span></span>'}</div>`;
   }
   const res = (h.Result==='1-0')?(myColor==='w'?'Win':'Loss'):(h.Result==='0-1')?(myColor==='b'?'Win':'Loss'):'Draw';
   void res;
@@ -1497,15 +1643,7 @@ function renderReviewReport(){
         ${mySum?`<div class="card card-pad">
           <div style="display:flex;justify-content:space-between;align-items:center"><span class="small muted">Your accuracy</span><b style="font-size:18px">${mySum.accuracy}%</b></div>
           <div class="legend mt-8">
-            <span><i class="cls-brilliant"></i>${mySum.brilliant||0} Brilliant</span>
-            <span><i class="cls-great"></i>${mySum.great||0} Great</span>
-            <span><i class="cls-best"></i>${mySum.best||0} Best</span>
-            <span><i class="cls-excellent"></i>${mySum.excellent||0} Excellent</span>
-            <span><i class="cls-good"></i>${mySum.good||0} Good</span>
-            <span><i class="cls-book"></i>${mySum.book||0} Book</span>
-            <span><i class="cls-inaccuracy"></i>${mySum.inaccuracy||0} Inacc.</span>
-            <span><i class="cls-mistake"></i>${mySum.mistake||0} Mist.</span>
-            <span><i class="cls-blunder"></i>${mySum.blunder||0} Blunder</span>
+            ${['brilliant','great','best','excellent','good','book','inaccuracy','mistake','blunder'].map(k=>`<span title="${CLS_LABEL[k]}"><i class="cls-${k}"></i>${mySum[k]||0} ${CLS_LABEL[k]}</span>`).join('')}
           </div></div>`:''}
       </div>
     </div>`;
