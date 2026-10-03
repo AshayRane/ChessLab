@@ -181,12 +181,56 @@ test('the move list shows the quality icon beside each move', () => {
       { fenBefore: afterE4.fen(), san: 'e5', uci: 'e7e5', mover: 'b', moveNum: 1, evalBefore: { best: 'e7e5', bestCpWhite: 0, secondCpWhite: 0 }, evalAfter: { bestCpWhite: 0, secondCpWhite: 0 }, cls: 'blunder' }
     ] });
   const html = renderReviewReport();
-  assert.match(html, /mv-ico[^>]*>★/);
+  assert.match(html, /mv-ico[^>]*>\u2B50\uFE0E/);
   assert.match(html, /mv-ico[^>]*>✕/);
   assert.match(html, /title="e4 — Brilliant"/);
   assert.match(html, /title="e5 — Blunder"/);
   assert.match(html, /aria-label="e4, Brilliant"/);
   assert.match(html, /aria-label="e5, Blunder"/);
+});
+
+test('the common classes use recognisable pictographic icons in text presentation', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  for (const san of ['e4', 'e5', 'Nf3']) g.move(san);
+  Board.init(el, g, { interactive: false });
+
+  // The four marks asked for: a book for theory, a thumb for a great move, a
+  // star for brilliant, ?! for an inaccuracy. Written as escapes so a future
+  // editor cannot silently drop the variation selector.
+  const wanted = { book: '\uD83D\uDCD6\uFE0E', great: '\uD83D\uDC4D\uFE0E', brilliant: '\u2B50\uFE0E' };
+  for (const [cls, glyph] of Object.entries(wanted)) {
+    Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls });
+    const badge = el.querySelector('.mv-badge');
+    assert.ok(badge, cls + ' must render a badge');
+    assert.equal(badge.textContent, glyph, cls + ' must show its pictographic icon');
+  }
+
+  // U+FE0E, VARIATION SELECTOR-15, is what forces TEXT presentation. Without
+  // it U+2B50/U+1F44D/U+1F4D6 default to EMOJI presentation and render as
+  // full-colour pictures that ignore the badge background -- a yellow star on a
+  // teal disc. The badge is a white-on-colour mark, so the selector is load
+  // bearing, and it is invisible in the source: nothing else guards it.
+  for (const cls of ['brilliant', 'great', 'book']) {
+    Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls });
+    const txt = el.querySelector('.mv-badge').textContent;
+    assert.ok(txt.endsWith('\uFE0E'), cls + ' glyph must carry the text-presentation selector');
+  }
+
+  // The badge paints its glyph in white, so a colour-emoji fallback font would
+  // be ignored anyway. Both stacks must prefer a symbol font over an emoji one.
+  // `html` is the module-level index.html source read at the top of this file.
+  for (const sel of ['.mv-badge', '.mv-ico']) {
+    const block = html.slice(html.indexOf(sel + '{'));
+    const fams = [...block.slice(0, block.indexOf('}')).matchAll(/"([^"]+)"/g)].map(m => m[1]);
+    const emoji = fams.findIndex(f => /Emoji|Color Emoji/.test(f));
+    const symbol = fams.findIndex(f => /Symbol/.test(f));
+    assert.ok(symbol >= 0, sel + ' must name a symbol font');
+    assert.ok(emoji === -1 || emoji > symbol, sel + ' must list the symbol font before any emoji font');
+  }
 });
 
 test('an ordinary developing move is not counted as a sacrifice', () => {
@@ -300,7 +344,7 @@ test('the board shows the quality badge on the piece that just moved', () => {
   assert.match(style, /left:calc\(62\.5% \+ 12\.5% - var\(--mv-badge,3\.75%\) - 0\.85%\)/, 'f-file is column 5, inset is the full box plus a margin');
   assert.match(style, /top:63\.6%/, 'rank 3 is row 5: 62.5% + 1.1%');
   assert.match(badge.className, /cls-brilliant/, 'badge carries the move class');
-  assert.equal(badge.textContent, '★', 'badge shows the class icon');
+  assert.equal(badge.textContent, '\u2B50\uFE0E', 'badge shows the class icon');
   // Decorative: the board is a grid, and the move list already names the class.
   assert.equal(badge.getAttribute('aria-hidden'), 'true', 'the board badge is decorative, not announced');
   assert.equal(badge.getAttribute('title'), 'Brilliant', 'title names the class for the mouse');
@@ -368,7 +412,13 @@ test('the review board badges the played piece on every ply, not the next move',
   // Read the maps from the source so this test cannot drift from the app.
   const src = inlineScripts.join('\n');
   const iconRule = (src.match(/CLS_ICON\s*=\s*\{[^}]+\}/) || [])[0] || '';
-  const ICONS = Object.fromEntries([...iconRule.matchAll(/(\w+):'([^']*)'/g)].map(m => [m[1], m[2]]));
+  // Decode \uXXXX escapes: the icon map writes the pictographic glyphs that way
+  // so the invisible U+FE0E text-presentation selector survives editing. The
+  // regex below therefore captures the SOURCE text ('\\u2B50\\uFE0E'), which
+  // is not the string the app renders -- compare against the decoded value or
+  // every pictographic class mismatches.
+  const ICONS = Object.fromEntries([...iconRule.matchAll(/(\w+):'([^']*)'/g)]
+    .map(m => [m[1], m[2].replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))]));
   const LABELS = { brilliant: 'Brilliant', great: 'Great', best: 'Best', excellent: 'Excellent', good: 'Good', book: 'Book', inaccuracy: 'Inaccuracy', mistake: 'Mistake', blunder: 'Blunder', q: '?' };
 
   const seen = [];

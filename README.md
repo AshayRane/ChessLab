@@ -2,7 +2,7 @@
 
 ChessLab is a local-first chess opening trainer and game-review app. It runs as a single browser application, needs no build step, and keeps your chess data in your browser.
 
-**Current release:** `v2.7.7`
+**Current release:** `v2.7.8`
 
 ---
 
@@ -205,7 +205,7 @@ If the engine cannot load:
 
 ### The page looks like an older version
 
-Check the version badge in the header. If it does not show `v2.7.7`, use a hard refresh:
+Check the version badge in the header. If it does not show `v2.7.8`, use a hard refresh:
 
 - Windows: `Ctrl + Shift + R`
 - macOS: `Cmd + Shift + R`
@@ -236,6 +236,7 @@ Confirm that it is your turn. The player color, current chess turn, and visual b
 - `v2.7.5` — give every move class its own colour and icon, fix Best/Excellent/Book classification, and measure sacrifices as net material
 - `v2.7.6` — show the move-quality badge on the board, on the piece that was played
 - `v2.7.7` — keep the board badge correct inside variations, size the glyph to its box, declare `--bw` on every board, and harden class resolution against inherited object keys
+- `v2.7.8` — show a star for a brilliant move, a thumbs-up for a great one and an open book for theory in the move-quality badge and the move list
 
 Each release is tagged in Git so a known-good version can be recovered.
 
