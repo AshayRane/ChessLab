@@ -119,7 +119,12 @@ table.tbl tr:last-child td{border-bottom:none}
 /* ================= BOARD (chess.com style) ================= */
 .board-wrap{display:flex;gap:12px;align-items:stretch}
 .board-outer{position:relative;border-radius:6px;overflow:hidden;box-shadow:0 4px 20px -6px rgba(49,46,43,.35);flex:none}
-#board,#builder-board,#review-board{position:relative;width:min(560px,92vw);aspect-ratio:1;touch-action:none;user-select:none;-webkit-user-select:none}
+/* --bw must be declared on all three boards, beside the width rule that
+   defines it. It was only ever set on #board inside the 880px media query, so
+   #review-board and #builder-board saw an undefined var() and every calc()
+   built on it resolved against a fixed 560px fallback instead of the real
+   board width -- which on a narrow screen means oversized chrome. */
+#board,#builder-board,#review-board{position:relative;width:min(560px,92vw);--bw:min(560px,92vw);aspect-ratio:1;touch-action:none;user-select:none;-webkit-user-select:none}
 #board .squares,#builder-board .squares,#review-board .squares{position:absolute;inset:0;display:grid;grid-template:repeat(8,1fr)/repeat(8,1fr)}
 #board .sq,#builder-board .sq,#review-board .sq{position:relative}
 #board .sq.l,#builder-board .sq.l,#review-board .sq.l{background:var(--sq-l)} #board .sq.d,#builder-board .sq.d,#review-board .sq.d{background:var(--sq-d)}
@@ -178,10 +183,23 @@ html[data-theme="dark"] .cls-ink-mistake{color:#fca5a5}
 html[data-theme="dark"] .cls-ink-blunder{color:#fecaca}
 html[data-theme="dark"] .cls-ink-q{color:#b0b8c4}
 .mv-badge{
-  position:absolute;width:26%;height:26%;
+  /* Sized against ONE SQUARE, not the board: this element is absolutely
+     positioned inside .badge-layer, which is inset:0 on the whole board, so a
+     bare 26% would be 26% of 560px = 2.08 squares and would spill over the
+     neighbours. One square is 12.5% of the board; 30% of that is a small
+     corner mark that clears the piece glyph.
+     The glyph MUST track the same box. A font size derived from the board
+     (--bw/16) left a 35px glyph in this 21px box, which overflow:hidden
+     clipped into an unreadable disc -- and the error grew on narrow screens.
+     Sizing both off the board at a fixed ratio keeps the glyph ~0.62x the box
+     at every board size. */
+  position:absolute;width:var(--mv-badge,3.75%);height:var(--mv-badge,3.75%);
   display:flex;align-items:center;justify-content:center;
   border-radius:50%;pointer-events:none;
-  font-size:calc(var(--bw)/13);line-height:1;font-weight:700;
+  /* 3.75% of the board * 0.62 = a glyph that fits the 3.75% box.
+     The fallback is required only if --bw is somehow unset; it is declared
+     on all three board ids. */
+  font-size:calc(var(--bw,560px) * 0.02325);line-height:1;font-weight:700;
   color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.45);
   box-shadow:0 0 0 1.5px rgba(255,255,255,.85),0 1px 3px rgba(0,0,0,.4);
   font-family:"Segoe UI Symbol","Apple Symbols",system-ui,sans-serif;
@@ -227,14 +245,18 @@ html[data-theme="dark"] .cls-q{background:#9ca3af}
 
 @media (max-width:980px){
   .game-grid{grid-template-columns:1fr}
-  #board,#builder-board,#review-board{width:min(94vw,560px)}
+  /* --bw must move with the width rule, or the calc()s that consume it
+     (badge glyph size, coordinate labels, capture ring) keep measuring
+     against the desktop board. */
+  #board,#builder-board,#review-board{width:min(94vw,560px);--bw:min(94vw,560px)}
 }
 @media (max-width:880px){
   .logo span.name{display:none}
   .tabs button{padding:0 10px;font-size:12.5px}
   .nav-chip{display:none}
   .pagewrap{padding:12px 12px 40px}
-  #board{--bw:min(94vw,560px)}
+  /* #board{--bw:...} used to live here and applied to #board only. The 980px
+     block above now sets --bw for all three boards, so this is redundant. */
   .stat-grid{grid-template-columns:repeat(3,1fr);gap:8px}
   .stat .value{font-size:20px}
 
@@ -255,7 +277,7 @@ html[data-theme="dark"] .cls-q{background:#9ca3af}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.6</span>
+<span class="ver-badge" title="ChessLab version">v2.7.7</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -836,6 +858,13 @@ function materialRiskAfter(fen, uci, mover){
 }
 const CLS_ICON = {brilliant:'★',great:'!!',best:'!',excellent:'✓',good:'○',book:'≡',inaccuracy:'?!',mistake:'?',blunder:'✕',q:'·'};
 const CLS_LABEL = {brilliant:'Brilliant',great:'Great',best:'Best',excellent:'Excellent',good:'Good',book:'Book',inaccuracy:'Inaccuracy',mistake:'Mistake',blunder:'Blunder',q:'?'};
+/* Resolve a stored/derived class to one we can actually render.
+   hasOwnProperty, not `!== undefined`: these are object literals, so they
+   inherit Object.prototype and 'constructor'/'toString' would otherwise pass
+   validation and render native function source as the label. */
+function clsOf(v, fallback){
+  return Object.prototype.hasOwnProperty.call(CLS_ICON, v) ? v : fallback;
+}
 /* A move is "as good as the engine's top choice" when the win probability it
    gives up is within the noise floor of the search. Without this tolerance any
    move the engine happened not to rank first was mislabelled Excellent. */
@@ -1221,16 +1250,27 @@ const Board = {
       // Quality badge on the square the piece landed on, so the piece that
       // was actually played carries its own mark. Only the destination is
       // badged: the origin square is where the piece used to be.
-      const cls = CLS_ICON[this.cls] !== undefined ? this.cls : null;
+      const cls = clsOf(this.cls, null);
       if(cls){
         const {x,y} = this._xy(this.lastMove.to);
         const label = CLS_LABEL[cls] || '';
         // aria-hidden: the board is role="grid" and expects only row/gridcell
         // children, so a role="img" here is an invalid child -- and the same
         // quality is already named on the move button and the detail badge, so
-        // announcing it twice would just be noise. The glyph is decorative;
-        // `title` still names it for the mouse.
-        badgeHtml += `<span class="mv-badge cls-${cls}" style="left:${x*12.5+1.2}%;top:${y*12.5+0.8}%"`
+        // announcing it twice would just be noise. The glyph is decorative.
+        // NOTE: `title` is a DOM-level hint only -- the badge is
+        // pointer-events:none so it cannot be hovered and no native tooltip
+        // appears. The real accessible name lives on the move button and the
+        // detail badge.
+  // Pinned INSIDE the square's top-right corner. The inset must be at least
+  // the FULL box width, not half of it: half centres the badge ON the edge,
+  // which is exactly straddling -- with a 3.75% box that put 0.85% of it
+  // outside the square on every file, and off the board on the h-file.
+  // .board-outer{overflow:hidden} would have hidden this, but nothing ever
+  // renders that class, so nothing clips. 4.6% = the 3.75% box + 0.85% margin.
+  // Vertically the box starts 1.1% down, so it sits in the square's upper band
+  // and leaves the piece glyph readable rather than covering it.
+        badgeHtml += `<span class="mv-badge cls-${cls}" style="left:calc(${x*12.5}% + 12.5% - var(--mv-badge,3.75%) - 0.85%);top:${y*12.5+1.1}%"`
              + ` title="${esc(label)}" aria-hidden="true">${esc(CLS_ICON[cls])}</span>`;
       }
     }
@@ -1244,7 +1284,7 @@ const Board = {
       for(const m of this.chess.moves({square:this.selected, verbose:true})){
         const {x,y} = this._xy(m.to);
         const occ = this.chess.get(m.to);
-        html += occ ? `<div class="hint-ring" style="position:absolute;left:${x*12.5}%;top:${y*12.5}%;width:12.5%;height:12.5%;border-radius:50%;border:calc(var(--bw)/70) solid rgba(20,20,10,.3);box-sizing:border-box"></div>`
+        html += occ ? `<div class="hint-ring" style="position:absolute;left:${x*12.5}%;top:${y*12.5}%;width:12.5%;height:12.5%;border-radius:50%;border:calc(var(--bw,560px)/70) solid rgba(20,20,10,.3);box-sizing:border-box"></div>`
                     : `<div class="hint-dot" style="left:${(x)*12.5}%;top:${(y)*12.5}%;width:12.5%;height:12.5%;position:absolute"></div>`;
       }
     }
@@ -1630,7 +1670,7 @@ function renderReviewReport(){
     detail = `<p class="small"><b>${branchLabel}:</b> ${branchMove.moveNum}${branchMove.mover==='w'?'.':'...'} ${esc(branchMove.san)}</p>`+
       (branchMove.evalAfter?`<p class="small">Eval: ${evalLabel(branchMove.evalBefore)} → ${evalLabel(branchMove.evalAfter)}${bdelta!=null?` · <b style="color:${bdelta>=0?'var(--green)':'var(--blun)'}">${bdelta>=0?'+':''}${bdelta}% ${branchMove.mover==='w'?'White':'Black'} win chance</b>`:''}</p>`:'');
   }else if(curPly){
-    const cls = CLS_ICON[curPly.cls] !== undefined ? curPly.cls : 'q';
+    const cls = clsOf(curPly.cls, 'q');
     detail = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <span class="cls-badge"><i class="cls-dot cls-${cls}"></i><span class="mv-ico cls-ink-${cls}" aria-hidden="true">${CLS_ICON[cls]||''}</span>${CLS_LABEL[cls]||'?'}</span>
       <b>${curPly.moveNum}${curPly.mover==='w'?'.':'...'} ${esc(curPly.san)}</b></div>`;
@@ -1647,7 +1687,7 @@ function renderReviewReport(){
     const pl = R.plys[idx];
     // Fall back to the neutral class for anything unexpected, so a stored or
     // unrecognised value can never emit an unstyled `cls-<value>`.
-    const cls = (pl && CLS_ICON[pl.cls] !== undefined) ? pl.cls : 'q';
+    const cls = clsOf(pl && pl.cls, 'q');
     const label = CLS_LABEL[cls] || '?';
     return `<button class="mv${ply===idx+1?' cur':''}" data-ply="${idx+1}" title="${esc(R.hist[idx].san)} — ${label}" aria-label="${esc(R.hist[idx].san)}, ${label}"><span class="mv-dot cls-${cls}"></span><span class="mv-ico cls-ink-${cls}" aria-hidden="true">${CLS_ICON[cls]||''}</span>${esc(R.hist[idx].san)}</button>`;
   };
@@ -1887,15 +1927,26 @@ function mountReviewBoard(){
   // The badge belongs to the move that was PLAYED, which is ply-1 in the
   // current position -- not the next move waiting to be made. At ply 0 there
   // is no played move and nothing is badged.
+  // One predicate governs the square, the arrow and the class. playedUci used
+  // to test `Review.branch && ply>basePly` without the upper bound branchActive
+  // has, so if the clamp and this guard ever diverged the square could come
+  // from a branch while the class came from the main line -- the exact bug
+  // this was fixed for.
+  const branchActive = !!(Review.branch && ply>Review.branch.basePly && ply<=branchEnd);
   const playedUci = ply>0
-    ? (Review.branch && ply>Review.branch.basePly
+    ? (branchActive
         ? Review.branch.moves[ply-Review.branch.basePly-1]
         : (Review.hist[ply-1] ? Review.hist[ply-1].uci : null))
     : null;
-  const playedPly = ply>0 ? Review.plys[ply-1] : null;
+  // Inside a branch the played move is NOT Review.plys[ply-1]: that array only
+  // ever holds the main line, so plys[ply-1] describes a different move and
+  // its class would be asserted about the branch move. A branch move is
+  // unanalysed, so it gets no class and therefore no badge -- the same call
+  // renderReviewReport makes with branchActive.
+  const playedPly = (branchActive || ply<1) ? null : Review.plys[ply-1];
   const nextPly = Review.plys[ply];
-  const branchUci = Review.branch && ply>Review.branch.basePly ? Review.branch.moves[ply-Review.branch.basePly-1] : null;
-  const shownCls = (playedPly && CLS_ICON[playedPly.cls] !== undefined) ? playedPly.cls : null;
+  const branchUci = branchActive ? Review.branch.moves[ply-Review.branch.basePly-1] : null;
+  const shownCls = playedPly ? clsOf(playedPly.cls, null) : null;
   if(playedUci){
     const opts = { lastMove:{ from:playedUci.slice(0,2), to:playedUci.slice(2,4) }, cls: shownCls };
     if(branchUci) opts.bestMove = {from:branchUci.slice(0,2), to:branchUci.slice(2,4)};

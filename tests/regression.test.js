@@ -288,13 +288,17 @@ test('the board shows the quality badge on the piece that just moved', () => {
   for (const san of ['e4', 'e5', 'Nf3']) g.move(san);
   Board.init(el, g, { interactive: false });
   // Black's Nf3 is the last move: the piece sits on f3 and must be badged.
-  // f3 is file 5, rank 3 -> x=5, y=5 -> 62.5% + 1.2% inset.
+  // f-file is column 5, rank 3 -> x=5, y=5. The badge is pinned INSIDE the
+  // square's top-right corner. The inset must be the FULL box width plus a
+  // margin: left = 62.5% + 12.5% - 3.75% (box) - 0.85% (margin) = 70.4%.
+  // Half the box (1.875%) would centre the badge ON the edge, putting 0.85%
+  // of it outside the square and off the board entirely on the h-file.
   Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: 'brilliant' });
   const badge = el.querySelector('.mv-badge');
   assert.ok(badge, 'a quality badge must be rendered on the board');
   const style = badge.getAttribute('style') || '';
-  assert.match(style, /left:63\.7%/, 'f-file is column 5: 62.5% + 1.2% inset');
-  assert.match(style, /top:63\.3%/, 'rank 3 is row 5: 62.5% + 0.8% inset');
+  assert.match(style, /left:calc\(62\.5% \+ 12\.5% - var\(--mv-badge,3\.75%\) - 0\.85%\)/, 'f-file is column 5, inset is the full box plus a margin');
+  assert.match(style, /top:63\.6%/, 'rank 3 is row 5: 62.5% + 1.1%');
   assert.match(badge.className, /cls-brilliant/, 'badge carries the move class');
   assert.equal(badge.textContent, '★', 'badge shows the class icon');
   // Decorative: the board is a grid, and the move list already names the class.
@@ -321,15 +325,15 @@ test('the board badge follows the last move for a black move on a flipped board'
   const g = new Chess();
   g.move('e4'); g.move('e5');
   // Black played e5. Seen from Black's side the e-file is column 3 and rank 5
-  // is row 4 -> 37.5% + 1.2% and 50% + 0.8%. A white-view board would put
-  // these at 51.2% and 38.8%, so these numbers prove the flip is honoured.
+  // is row 4 -> left = 37.5% + 12.5% - 2.9%, top = 50% + 1.1%. A white-view
+  // board would give 62.5%+12.5% and 37.5%+1.1%, so these prove the flip.
   Board.init(el, g, { color: 'b', interactive: false });
   Board.render({ lastMove: { from: 'e7', to: 'e5' }, cls: 'blunder' });
   const badge = el.querySelector('.mv-badge');
   assert.ok(badge, 'badge must render for a black move');
   const style = badge.getAttribute('style') || '';
-  assert.match(style, /left:38\.7%/, 'flipped e-file is column 3, not 4');
-  assert.match(style, /top:50\.8%/, 'flipped rank 5 is row 4, not 3');
+  assert.match(style, /left:calc\(37\.5% \+ 12\.5% - var\(--mv-badge,3\.75%\) - 0\.85%\)/, 'flipped e-file is column 3, not 4');
+  assert.match(style, /top:51\.1%/, 'flipped rank 5 is row 4, not 3');
   assert.equal(badge.textContent, '✕', 'a blunder shows its own icon');
 });
 
@@ -418,6 +422,200 @@ test('the board badge is drawn above the piece it marks', () => {
   // And it must still be under the arrow layer, so engine arrows stay visible.
   const arrowZ = 20;
   assert.ok(layerZ < arrowZ, 'badge layer must stay below arrows (' + arrowZ + ')');
+});
+
+test('the review board mount rejects an inherited key in a stored class', () => {
+  const { context } = loadApp();
+  const { Review, Board, mountReviewBoard } = context.__test;
+  // mountReviewBoard resolves the played ply's class through its own
+  // clsOf() call -- a fourth site, separate from the board overlay, the move
+  // list and the detail badge. Without driving it here, reverting that one
+  // call to the unsafe `CLS_ICON[x] !== undefined` test leaves the whole
+  // suite green, so the site is unprotected.
+  const host = context.document.createElement('div');
+  host.id = 'review-board';
+  context.document.body.appendChild(host);
+  const gg = new Chess();
+  const sans = ['e4', 'e5', 'Nf3'];
+  const rep = new Chess();
+  const plies = [];
+  for (let i = 0; i < sans.length; i++) {
+    const fenBefore = rep.fen();
+    const mv = rep.moves({ verbose: true }).find(x => x.san === sans[i]);
+    const uci = mv.from + mv.to + (mv.promotion || '');
+    rep.move({ from: mv.from, to: mv.to, promotion: mv.promotion });
+    // Hostile class on the ply that WILL be badged at nav=1.
+    plies.push({ fenBefore, san: sans[i], uci, mover: mv.color, moveNum: Math.floor(i / 2) + 1,
+      cls: i === 0 ? 'constructor' : 'book', evalBefore: { best: uci, bestCpWhite: 0, secondCpWhite: 0 }, evalAfter: { bestCpWhite: 0, secondCpWhite: 0 } });
+  }
+  for (const bad of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    Review.data = { key: 'mount-spoof', username: 'me' };
+    Review.headers = { White: 'me', Black: 'opp', Result: '*' };
+    Review.hist = plies.map(p => ({ san: p.san, uci: p.uci }));
+    Review.plys = plies.map(p => ({ ...p, cls: p.cls === 'book' ? 'book' : bad }));
+    Review.branch = null;
+    Review.nav = 1;
+    mountReviewBoard();
+    assert.equal(Board.cls, null, 'stored class "' + bad + '" must not become a badge class');
+    assert.equal(host.querySelector('.mv-badge'), null, 'no badge may be rendered for "' + bad + '"');
+    assert.equal(host.innerHTML.indexOf('cls-' + bad), -1, 'no cls-' + bad + ' class may be emitted');
+  }
+  // A real class through the same path still works, so the guard is not
+  // simply suppressing every badge.
+  Review.plys = plies.map(p => ({ ...p, cls: p.cls === 'book' ? 'book' : 'blunder' }));
+  Review.nav = 1;
+  mountReviewBoard();
+  assert.equal(Board.cls, 'blunder', 'a real class must still badge through mountReviewBoard');
+  assert.equal(host.querySelector('.mv-badge').textContent, '✕', 'and render its own glyph');
+});
+
+test('a branch move is not badged with the main line judgement', () => {
+  const { context } = loadApp();
+  const { Review, Board, mountReviewBoard } = context.__test;
+  const host = context.document.createElement('div');
+  host.id = 'review-board';
+  context.document.body.appendChild(host);
+  const sans = ['e4', 'e5', 'Nf3', 'Nc6', 'Bb5'];
+  const rep = new Chess();
+  const plies = [];
+  for (let i = 0; i < sans.length; i++) {
+    const fenBefore = rep.fen();
+    const mv = rep.moves({ verbose: true }).find(x => x.san === sans[i]);
+    const uci = mv.from + mv.to + (mv.promotion || '');
+    rep.move({ from: mv.from, to: mv.to, promotion: mv.promotion });
+    plies.push({ fenBefore, san: sans[i], uci, mover: mv.color, moveNum: Math.floor(i / 2) + 1, cls: 'blunder', evalBefore: { best: uci, bestCpWhite: 20, secondCpWhite: 19 }, evalAfter: { bestCpWhite: -50, secondCpWhite: 10 } });
+  }
+  Review.data = { key: 'branch', username: 'me' };
+  Review.headers = { White: 'me', Black: 'opp', Result: '*' };
+  Review.hist = plies.map(p => ({ san: p.san, uci: p.uci }));
+  Review.plys = plies;
+  // A branch that plays b1c3 (Nc3) where the main line played Nf3, both from
+  // the same base position. plys[2] is the 'Nf3' blunder.
+  Review.branch = { basePly: 2, moves: ['b1c3'] };
+  Review.nav = 3;
+  mountReviewBoard();
+  // The badge must land on the branch move's square...
+  assert.equal(Board.lastMove.to, 'c3', 'the highlight must follow the branch move');
+  // ...but carry no class, because a branch move was never analysed. Labelling
+  // it with the main line's blunder would assert Nf3's verdict about Nc3.
+  assert.equal(Board.cls, null, 'a branch move must not inherit the main line class');
+  assert.equal(host.querySelector('.mv-badge'), null, 'no badge for an unanalysed branch move');
+  // Leaving the branch restores the main line badge.
+  Review.branch = null;
+  Review.nav = 3;
+  mountReviewBoard();
+  assert.equal(Board.lastMove.to, 'f3', 'back on the main line');
+  assert.equal(Board.cls, 'blunder', 'the main line move is badged again');
+});
+
+test('the badge cannot be spoofed with an inherited object key', () => {
+  const { context } = loadApp();
+  const { Board, Review, renderReviewReport } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  g.move('e4'); g.move('e5'); g.move('Nf3');
+  Board.init(el, g, { interactive: false });
+  // CLS_ICON is an object literal, so it inherits Object.prototype. A `!==
+  // undefined` membership test would accept these and render native function
+  // source as the badge label.
+  for (const key of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+    Board.render({ lastMove: { from: 'f3', to: 'f3' }, cls: key });
+    const badge = el.querySelector('.mv-badge');
+    assert.equal(badge, null, 'inherited key "' + key + '" must not render a board badge');
+  }
+  // The same class value must not break the move list or the detail badge
+  // either: those resolve the class too, and previously used the unsafe test.
+  const gg = new Chess(); gg.move('e4');
+  const startG = new Chess();
+  Review.open({ key: 'spoof', pgn: gg.pgn(), headers: {}, summary: {},
+    plies: [
+      { fenBefore: startG.fen(), san: 'e4', uci: 'e2e4', mover: 'w', moveNum: 1, evalBefore: null, evalAfter: null, cls: 'constructor' }
+    ] });
+  const text = renderReviewReport();
+  assert.ok(!/cls-constructor/.test(text), 'no cls-constructor class may be emitted');
+  assert.ok(!/cls-toString/.test(text), 'no cls-toString class may be emitted');
+  assert.ok(!/function Object\(\)/.test(text), 'no native function source may be rendered');
+  assert.ok(!/function toString\(\)/.test(text), 'no native function source may be rendered');
+  // And the detail badge, which resolves the class through a different call
+  // site: land on the ply so curPly is rendered.
+  Review.nav = 1;
+  const detail = renderReviewReport();
+  assert.ok(!/cls-constructor/.test(detail), 'the detail badge must not emit cls-constructor');
+  assert.ok(!/function Object\(\)/.test(detail), 'the detail badge must not render native source');
+});
+
+test('the badge is sized to one square and does not spill over neighbours', () => {
+  const { context } = loadApp();
+  const style = (html.match(/<style[^>]*>([\s\S]*?)<\/style>/i) || [])[1] || '';
+  // Strip comments: this rule now carries prose about the very numbers being
+  // asserted, and matching the comment would read those instead.
+  const css = style.replace(/\/\*[\s\S]*?\*\//g, '');
+  const rule = (css.match(/\.mv-badge\{([\s\S]*?)\}/) || [])[1] || '';
+  // The box is declared as var(--mv-badge, <fallback>%): the inline inset
+  // subtracts the same variable so the two provably cannot drift. Resolve the
+  // fallback so the bound below sees the real number.
+  const wDecl = (rule.match(/(?:^|;)\s*width:\s*([^;]+)/) || [])[1] || '';
+  const w = wDecl;
+  const pct = parseFloat((wDecl.match(/var\(--mv-badge\s*,\s*([\d.]+)%/) || [])[1] ?? wDecl);
+  assert.ok(w.includes('%'), 'the badge must be sized as a percentage: ' + w);
+  // One square is 12.5% of the board. The badge is absolutely positioned
+  // inside a layer that is inset:0 on the whole board, so percentages resolve
+  // against the board, not the square. It must stay well under 12.5%.
+  // Bound it to a third of a square: this test is named for spill, and the
+  // bare `pct < 12.5` let a 12% badge -- 96% of a square, which would bury
+  // the piece entirely -- pass, because widening the box only relaxes the
+  // glyph assertion below.
+  assert.ok(pct > 0 && pct <= 12.5 * 0.34,
+    'badge must stay under a third of one square (4.25%), got ' + w);
+  // The GLYPH must fit the box, not just the board. This is the assertion the
+  // previous version of this test lacked: it checked only that width was under
+  // 12.5% and that font-size contained `var(--bw,`, so it passed green over a
+  // badge whose 35px glyph overflowed its 21px box and was clipped to an
+  // unreadable disc. Both are now derived from the board, so compute the
+  // glyph size the stylesheet asks for and require it to fit.
+  const fs = (rule.match(/font-size:\s*([^;]+)/) || [])[1] || '';
+  assert.match(fs, /var\(--bw\s*,/, 'font-size needs a --bw fallback: ' + fs);
+  // Parse either form: calc(<var-expr> * k) or calc(<var-expr> / n).
+  // --bw is a LENGTH equal to 100% of the board, so a glyph declared as
+  // k*--bw is k*100% of the board, and --bw/n is (100/n)% of the board.
+  // Both are then directly comparable to `pct`, the badge box in the same
+  // percent-of-board unit. (Mixing these units is what let the original
+  // 35px-glyph-in-21px-box clipping pass this test twice.)
+  const mul = fs.match(/var\(--bw\s*,\s*[\d.]+px\)\s*\*\s*([\d.]+)/);
+  const div = fs.match(/var\(--bw\s*,\s*[\d.]+px\)\s*\/\s*([\d.]+)/);
+  let glyphPct; // glyph height as a percent of the board
+  if (mul) glyphPct = parseFloat(mul[1]) * 100;      // k * 100%
+  else if (div) glyphPct = 100 / parseFloat(div[1]); // (100/n)%
+  else assert.fail('cannot relate font-size to the box: ' + fs);
+  // A glyph taller than its box is clipped by overflow:hidden.
+  assert.ok(glyphPct <= 0.9 * pct,
+    'glyph must fit the badge box: glyph is ' + glyphPct.toFixed(2) + '% of the board, box is ' + pct + '%');
+});
+
+test('--bw is declared on every board, not just #board', () => {
+  // The badge, the coordinate labels and the capture ring all size themselves
+  // from --bw. It used to be declared only on #board and only inside the 880px
+  // media query, so #review-board and #builder-board resolved every calc()
+  // against a fixed 560px fallback -- oversized chrome on a narrow screen, and
+  // a badge whose glyph no longer matched its box.
+  const style = (html.match(/<style[^>]*>([\s\S]*?)<\/style>/i) || [])[1] || '';
+  // Strip CSS comments first: prose mentioning #board or --bw would otherwise
+  // be matched as if it were a real declaration.
+  const css = style.replace(/\/\*[\s\S]*?\*\//g, '');
+  for (const id of ['#board', '#builder-board', '#review-board']) {
+    const rules = [...css.matchAll(new RegExp('(^|[,{}])' + id + '(?![-\\w])[^{}]*\\{([^}]*)\\}', 'gm'))];
+    assert.ok(rules.length > 0, 'no rule found for ' + id);
+    assert.ok(rules.some(m => /--bw\s*:/.test(m[2])),
+      id + ' must declare --bw; found: ' + rules.map(m => m[0].slice(0, 60)).join(' | '));
+  }
+  // Any media query that changes the board width must move --bw with it.
+  const media = [...css.matchAll(/@media[^{]*\{([\s\S]*?)\n\}/g)].map(m => m[1]);
+  for (const block of media) {
+    if (/#(?:builder-|review-)?board[^{}]*\{[^}]*width\s*:/.test(block)) {
+      assert.ok(block.indexOf('--bw') > -1, 'a media query that resizes the board must also set --bw');
+    }
+  }
 });
 
 test('a Review badge does not leak onto the Play or Openings board', () => {
