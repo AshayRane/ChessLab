@@ -128,10 +128,10 @@ table.tbl tr:last-child td{border-bottom:none}
 #board .squares,#builder-board .squares,#review-board .squares{position:absolute;inset:0;display:grid;grid-template:repeat(8,1fr)/repeat(8,1fr)}
 #board .sq,#builder-board .sq,#review-board .sq{position:relative}
 #board .sq.l,#builder-board .sq.l,#review-board .sq.l{background:var(--sq-l)} #board .sq.d,#builder-board .sq.d,#review-board .sq.d{background:var(--sq-d)}
-#board .sq .coord-f,#board .sq .coord-r{position:absolute;font-size:calc(var(--bw,560px)/56);font-weight:700;opacity:.9}
-#board .coord-file{bottom:2%;right:4%}
-#board .coord-rank{top:3%;left:5%}
-#board .sq.l .coord{color:var(--sq-d)} #board .sq.d .coord{color:var(--sq-l)}
+#board .sq .coord-f,#builder-board .sq .coord-f,#review-board .sq .coord-f,#board .sq .coord-r,#builder-board .sq .coord-r,#review-board .sq .coord-r{position:absolute;font-size:calc(var(--bw,560px)/56);font-weight:700;opacity:.9;z-index:1;pointer-events:none}
+#board .coord-file,#builder-board .coord-file,#review-board .coord-file{bottom:2%;right:4%}
+#board .coord-rank,#builder-board .coord-rank,#review-board .coord-rank{top:3%;left:5%}
+#board .sq.l .coord,#builder-board .sq.l .coord,#review-board .sq.l .coord{color:var(--sq-d)} #board .sq.d .coord,#builder-board .sq.d .coord,#review-board .sq.d .coord{color:var(--sq-l)}
 #board .hl,#builder-board .hl,#review-board .hl{position:absolute;inset:0;background:rgba(255,255,51,.42)}
 #board .hl-sel,#builder-board .hl-sel,#review-board .hl-sel{position:absolute;inset:0;background:rgba(255,255,51,.5)}
 #board .hl-check,#builder-board .hl-check,#review-board .hl-check{position:absolute;inset:0;background:radial-gradient(circle,rgba(255,60,40,.75) 20%,rgba(255,60,40,.28) 55%,transparent 75%)}
@@ -282,7 +282,7 @@ html[data-theme="dark"] .cls-q{background:#9ca3af}
   <div class="logo"><span class="mark">♞</span><span class="name">ChessLab</span></div>
   <nav class="tabs" id="tabs" aria-label="Main navigation"></nav>
   <div class="nav-right" id="nav-chips"></div>
-<span class="ver-badge" title="ChessLab version">v2.7.8</span>
+<span class="ver-badge" title="ChessLab version">v2.7.9</span>
 </header>
 <main id="main" class="pagewrap" tabindex="-1"></main>
 <div id="toast-root" aria-live="polite"></div>
@@ -1113,35 +1113,58 @@ const Board = {
     el.setAttribute('role','grid'); el.setAttribute('aria-label','Chess board'); el.setAttribute('aria-rowcount','8'); el.setAttribute('aria-colcount','8'); el.setAttribute('tabindex','0');
     const sameEl = this.el === el;
     if(!sameEl) this._teardownEvents();
+    /* Re-mounting the SAME element at the SAME orientation must not wipe the
+       piece DOM: mountPlayBoard() runs right after every user move, and a wipe
+       here rebuilt every piece instantly -- cancelling the glide the render
+       that had just run had started, so the player's own moves never animated.
+       Keep the piece elements and let the diff slide them instead. */
+    const animateIn = sameEl && this.color === color;
     this.el = el;
     this.color = color;
     this.interactive = interactive;
     this.chess = chess;
-    this.pieces.clear();
-    el.innerHTML = '';  // wipe any previous board DOM (squares, overlays, pieces)
     this.selected = null; this.arrows = sameEl ? (this.arrows || []) : [];
     this.focusSquare = this.color==='b' ? 'e8' : 'e2';
-    this.lastMove = null; this.bestMove = null;
-    this._buildSquaresOnce();
-    this._syncPieces(true);
+    this.lastMove = null; this.bestMove = null; this.cls = null;
+    if(!animateIn){
+      this.pieces.clear();
+      el.innerHTML = '';  // wipe any previous board DOM (squares, overlays, pieces)
+    }
+    this._buildSquares();
+    this._syncPieces(!animateIn);
     if(interactive) this._bindEvents();
+    this._renderOverlays();
   },
-  _buildSquaresOnce(){
-    // squares layer built once
-    if(this.el.querySelector('.squares')) return;
+  _buildSquares(){
+    /* Squares carry their coordinate names: the file letter on the bottom edge
+       and the rank number on the left edge, named from the VIEWER's side --
+       a-h / 1-8 read normally whether the board is flipped or not. The layer
+       is rebuilt only when the orientation changes (colours are
+       parity-symmetric under a 180-degree turn; the labels are not). */
+    const existing = this.el.querySelector('.squares');
+    if(existing){
+      if(existing.dataset.orient === this.color) return;
+      existing.remove();
+    }
     const layer = document.createElement('div');
     layer.className = 'squares';
+    layer.dataset.orient = this.color;
     let html = '';
     for(let r=0;r<8;r++) for(let c2=0;c2<8;c2++){
       const dark = (r+c2)%2===1;
-      const file = 'abcdefgh'[c2], rank = 8-r;
-      const sq = file+rank;
-      layer.innerHTML += `<div class="sq ${dark?'d':'l'}" data-sq="${sq}" role="gridcell" aria-label="${sq}" tabindex="-1"></div>`;
+      // The square VISUALLY occupying this grid cell for the current orientation.
+      const f = this.color==='b' ? 7-c2 : c2;
+      const rank = this.color==='b' ? r+1 : 8-r;
+      const sq = 'abcdefgh'[f]+rank;
+      let inner = '';
+      if(r===7) inner += `<span class="coord coord-f coord-file" aria-hidden="true">${'abcdefgh'[f]}</span>`;
+      if(c2===0) inner += `<span class="coord coord-r coord-rank" aria-hidden="true">${rank}</span>`;
+      layer.innerHTML += `<div class="sq ${dark?'d':'l'}" data-sq="${sq}" role="gridcell" aria-label="${sq}" tabindex="-1">${inner}</div>`;
     }
     this.el.appendChild(layer);
   },
   render(opts={}){
-    this._buildSquaresOnce();
+    this._buildSquares();
     if(opts.lastMove!==undefined) this.lastMove = opts.lastMove;
     if(opts.bestMove!==undefined) this.bestMove = opts.bestMove;
     if(opts.clearBest) this.bestMove = null;
@@ -1164,6 +1187,7 @@ const Board = {
     const oldEntries = [...this.pieces.entries()];
     const usedOld = new Set();
     const matched = new Map();
+    let totalDist = 0;
     for(let wi=0; wi<wanted.length; wi++){
       const w = wanted[wi];
       let bestK=null, bestDist=Infinity;
@@ -1173,12 +1197,17 @@ const Board = {
         const d = Math.abs('abcdefgh'.indexOf(p.sq[0])-'abcdefgh'.indexOf(w.sq[0])) + Math.abs((+p.sq[1])-(+w.sq[1]));
         if(d < bestDist){ bestDist=d; bestK=k; }
       }
-      if(bestK!=null){ usedOld.add(bestK); matched.set(wi, bestK); }
+      if(bestK!=null){ usedOld.add(bestK); matched.set(wi, bestK); totalDist += bestDist; }
     }
+    /* A single move displaces a couple of pieces by a couple of squares; a
+       NEW game or a far ply-seek displaces most of the board. Sliding every
+       piece across the board on a reset looks like chaos, so positions that
+       changed wholesale snap instead of gliding. */
+    const instantAll = instant || totalDist > 32;
     for(const [wi, key] of matched){
       const w = wanted[wi];
       const p = this.pieces.get(key);
-      this._applyTransform(p, w.sq, instant);
+      this._applyTransform(p, w.sq, instantAll);
       p.sq = w.sq; p.type = w.type; p.color = w.color;
     }
     for(const [k, p] of oldEntries){

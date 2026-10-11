@@ -1995,3 +1995,63 @@ test('strict analysis state accepts records without an optional practiceGames ar
   } } }, { strict: true });
   assert.equal(Object.keys(state.analyzed).length, 1);
 });
+
+test('the board names its squares a-h / 1-8 from the viewer side', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  Board.init(el, new Chess(), { color: 'w', interactive: false });
+  // White view: the bottom row is rank 1 and reads a..h left to right; the
+  // left column is file a and reads 8 down to 1.
+  const rows = [...el.querySelectorAll('.squares .sq')];
+  assert.equal(rows.length, 64, 'the squares layer must keep 64 squares');
+  const bottom = rows.filter(sq => sq.querySelector('.coord-file')).map(sq => sq.querySelector('.coord-file').textContent);
+  assert.deepEqual(bottom, ['a','b','c','d','e','f','g','h'], 'bottom edge names the files in order');
+  const left = rows.filter(sq => sq.querySelector('.coord-rank')).map(sq => sq.querySelector('.coord-rank').textContent);
+  assert.deepEqual(left, ['8','7','6','5','4','3','2','1'], 'left edge names the ranks top to bottom');
+  // Labels are decorative inside a role=grid gridcell: the square's own
+  // aria-label already names it, so the glyph must not be announced twice.
+  for(const c of el.querySelectorAll('.coord')) assert.equal(c.getAttribute('aria-hidden'), 'true');
+  // Flipped view: a1 sits top-right, so the bottom edge must read h..a and the
+  // left column must run 1..8 downward -- named from the viewer, not the board.
+  Board.init(el, new Chess(), { color: 'b', interactive: false });
+  const flipped = [...el.querySelectorAll('.squares .sq')];
+  const fBottom = flipped.filter(sq => sq.querySelector('.coord-file')).map(sq => sq.querySelector('.coord-file').textContent);
+  assert.deepEqual(fBottom, ['h','g','f','e','d','c','b','a'], 'a flipped board still reads a-h from the viewer');
+  const fLeft = flipped.filter(sq => sq.querySelector('.coord-rank')).map(sq => sq.querySelector('.coord-rank').textContent);
+  assert.deepEqual(fLeft, ['1','2','3','4','5','6','7','8'], 'a flipped board still reads 1-8 from the viewer');
+  // data-sq must track the visible square too: the top-left cell IS h1 now.
+  const topLeft = flipped[0];
+  assert.equal(topLeft.dataset.sq, 'h1', 'the top-left cell of a flipped board is h1');
+  assert.equal(topLeft.getAttribute('aria-label'), 'h1');
+  assert.equal(topLeft.classList.contains('l'), true, 'h1 is a light square');
+});
+
+test('re-mounting the same board keeps the piece DOM so moves can animate', () => {
+  const { context } = loadApp();
+  const { Board } = context.__test;
+  const el = context.document.createElement('div');
+  context.document.body.appendChild(el);
+  const g = new Chess();
+  Board.init(el, g, { color: 'w', interactive: true });
+  const pawn = [...Board.pieces.values()].find(p => p.sq === 'e2');
+  assert.ok(pawn, 'the e2 pawn must be rendered');
+  // Play a move and re-mount, exactly as mountPlayBoard() does after every
+  // user move. Wiping the DOM here rebuilt every piece instantly and killed
+  // the glide; the SAME element nodes must survive so the CSS transition on
+  // their transform is what the viewer sees.
+  g.move('e4');
+  Board.init(el, g, { color: 'w', interactive: true });
+  assert.ok(el.contains(pawn.el), 'the moved piece element must survive a re-mount of the same board');
+  assert.equal(pawn.sq, 'e4', 'the surviving element is tracked at its new square');
+  assert.equal(el.querySelectorAll('.piece').length, 32, 'no piece may be duplicated by a re-mount');
+  // A fresh element (or an orientation change) still starts from a clean wipe.
+  const el2 = context.document.createElement('div');
+  context.document.body.appendChild(el2);
+  Board.init(el2, g, { color: 'w', interactive: false });
+  assert.equal(el2.querySelectorAll('.piece').length, 32, 'a fresh element renders the same position');
+  Board.init(el2, g, { color: 'b', interactive: false });
+  assert.equal(el2.querySelectorAll('.piece').length, 32, 'an orientation change must not duplicate pieces');
+  assert.notEqual(el2.querySelector('.squares').dataset.orient, undefined, 'the squares layer records its orientation');
+});
